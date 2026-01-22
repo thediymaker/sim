@@ -27,7 +27,7 @@ const providerRegistry: Record<ProviderId, ProviderConfig> = {
   xai: xAIProvider,
   cerebras: cerebrasProvider,
   groq: groqProvider,
-  vllm: vllmProvider,
+
   litellm: litellmProvider,
   mistral: mistralProvider,
   'azure-openai': azureOpenAIProvider,
