@@ -1085,7 +1085,7 @@ export const knowledgeBase = pgTable(
 
     // Embedding configuration
     embeddingModel: text('embedding_model').notNull().default('text-embedding-3-small'),
-    embeddingDimension: integer('embedding_dimension').notNull().default(1536),
+    embeddingDimension: integer('embedding_dimension').notNull().default(4096),
 
     // Chunking configuration stored as JSON for flexibility
     chunkingConfig: json('chunking_config')
@@ -1249,7 +1249,7 @@ export const embedding = pgTable(
     tokenCount: integer('token_count').notNull(),
 
     // Vector embeddings - optimized for text-embedding-3-small with HNSW support
-    embedding: vector('embedding', { dimensions: 1536 }), // For text-embedding-3-small
+    embedding: vector('embedding', { dimensions: 4096 }), // Vector dimension (use MRL truncation for models)
     embeddingModel: text('embedding_model').notNull().default('text-embedding-3-small'),
 
     // Chunk boundaries and overlap
@@ -1309,12 +1309,13 @@ export const embedding = pgTable(
     docEnabledIdx: index('emb_doc_enabled_idx').on(table.documentId, table.enabled),
 
     // Vector similarity search indexes (HNSW) - optimized for small embeddings
-    embeddingVectorHnswIdx: index('embedding_vector_hnsw_idx')
-      .using('hnsw', table.embedding.op('vector_cosine_ops'))
-      .with({
-        m: 16,
-        ef_construction: 64,
-      }),
+    // NOTE: HNSW index removed due to 2000 dimension limit on pgvector < v0.7.0 (approx)
+    // embeddingVectorHnswIdx: index('embedding_vector_hnsw_idx')
+    //   .using('hnsw', table.embedding.op('vector_cosine_ops'))
+    //   .with({
+    //     m: 16,
+    //     ef_construction: 64,
+    //   }),
 
     // Text tag indexes
     tag1Idx: index('emb_tag1_idx').on(table.tag1),
@@ -1358,7 +1359,7 @@ export const docsEmbeddings = pgTable(
     tokenCount: integer('token_count').notNull(),
 
     // Vector embedding - optimized for text-embedding-3-small with HNSW support
-    embedding: vector('embedding', { dimensions: 1536 }).notNull(),
+    embedding: vector('embedding', { dimensions: 4096 }).notNull(),
     embeddingModel: text('embedding_model').notNull().default('text-embedding-3-small'),
 
     // Metadata for flexible filtering

@@ -166,7 +166,7 @@ export function getBaseModelProviders(): Record<string, ProviderId> {
       ([providerId]) =>
         providerId !== 'ollama' &&
         providerId !== 'vllm' &&
-        providerId !== 'litellm' &&
+        // providerId !== 'litellm' && // Allowed now
         providerId !== 'openrouter'
     )
     .reduce(

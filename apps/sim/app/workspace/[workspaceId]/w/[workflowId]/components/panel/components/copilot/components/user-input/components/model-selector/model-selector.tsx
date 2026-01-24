@@ -41,24 +41,57 @@ function getModelIconComponent(modelValue: string) {
  */
 export function ModelSelector({ selectedModel, isNearTop, onModelSelect }: ModelSelectorProps) {
   const [open, setOpen] = useState(false)
+  const [models, setModels] = useState<{ value: string; label: string }[]>([])
   const triggerRef = useRef<HTMLDivElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
 
+  useEffect(() => {
+    async function fetchModels() {
+      try {
+        const response = await fetch('/api/providers/litellm/models')
+        if (response.ok) {
+          const data = await response.json()
+          if (Array.isArray(data.models)) {
+            const dynamicModels = data.models.map((id: string) => ({
+              value: id,
+              label: id,
+            }))
+            // Fallback to static if dynamic is empty, or just use dynamic
+            // If the user wants ONLY models from endpoint, we should use dynamic ONLY.
+            if (dynamicModels.length > 0) {
+              setModels(dynamicModels)
+            } else {
+              // Fallback or empty?
+              // User said: "litellm will only show the models...".
+              // The API might return [] if not configured, in which case we might show nothing or static.
+              // Let's set it to dynamic even if empty, or maybe keep a safe fallback.
+              setModels([])
+            }
+          }
+        }
+      } catch (error) {
+        console.error('Failed to fetch models', error)
+      }
+    }
+    fetchModels()
+  }, [])
+
   const getCollapsedModeLabel = () => {
-    const model = MODEL_OPTIONS.find((m) => m.value === selectedModel)
-    return model ? model.label : 'claude-4.5-sonnet'
+    const model = models.find((m) => m.value === selectedModel)
+    return model ? model.label : selectedModel
   }
 
   const getModelIcon = () => {
+    // Attempt to get icon, fallback to a generic one or simple dot if null
     const IconComponent = getProviderIcon(selectedModel)
-    if (!IconComponent) {
-      return null
+    if (IconComponent) {
+      return (
+        <span className='flex-shrink-0'>
+          <IconComponent className='h-3 w-3' />
+        </span>
+      )
     }
-    return (
-      <span className='flex-shrink-0'>
-        <IconComponent className='h-3 w-3' />
-      </span>
-    )
+    return null
   }
 
   const handleSelect = (modelValue: string) => {
@@ -95,6 +128,10 @@ export function ModelSelector({ selectedModel, isNearTop, onModelSelect }: Model
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [open])
 
+  // If no models loaded yet, use selectedModel as single option or static fallback?
+  // User wants just the list.
+  const displayModels = models.length > 0 ? models : (MODEL_OPTIONS.length > 0 ? MODEL_OPTIONS : [{ value: selectedModel, label: selectedModel }])
+
   return (
     <Popover open={open} variant='default'>
       <PopoverAnchor asChild>
@@ -124,7 +161,7 @@ export function ModelSelector({ selectedModel, isNearTop, onModelSelect }: Model
         onCloseAutoFocus={(e) => e.preventDefault()}
       >
         <PopoverScrollArea className='space-y-[2px]'>
-          {MODEL_OPTIONS.map((option) => (
+          {displayModels.map((option) => (
             <PopoverItem
               key={option.value}
               active={selectedModel === option.value}

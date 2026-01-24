@@ -98,7 +98,7 @@ try {
   if (diffStore?.hasActiveDiff) {
     diffStore.clearDiff()
   }
-} catch {}
+} catch { }
 
 // Known class-based client tools: map tool name -> instantiator
 const CLIENT_TOOL_INSTANTIATORS: Record<string, (id: string) => any> = {
@@ -235,7 +235,7 @@ function ensureClientToolInstance(toolName: string | undefined, toolCallId: stri
       const inst = make(toolCallId)
       registerClientTool(toolCallId, inst)
     }
-  } catch {}
+  } catch { }
 }
 
 // Constants
@@ -289,7 +289,7 @@ function resolveToolDisplay(
       const cand = meta?.[key]
       if (cand?.text || cand?.icon) return { text: cand.text, icon: cand.icon }
     }
-  } catch {}
+  } catch { }
   // Humanized fallback as last resort - include state verb for proper verb-noun styling
   try {
     if (toolName) {
@@ -316,7 +316,7 @@ function resolveToolDisplay(
       }
       return { text: `${stateVerb} ${formattedName}`, icon: undefined as any }
     }
-  } catch {}
+  } catch { }
   return undefined
 }
 
@@ -430,7 +430,7 @@ function abortAllInProgressTools(set: any, get: () => CopilotStore) {
         return { messages: msgs }
       })
     }
-  } catch {}
+  } catch { }
 }
 
 // Normalize loaded messages so assistant messages render correctly from DB
@@ -555,9 +555,9 @@ const contentBlockPool = new ObjectPool(
     obj.type = ''
     obj.content = ''
     obj.timestamp = 0
-    ;(obj as any).toolCall = null
-    ;(obj as any).startTime = undefined
-    ;(obj as any).duration = undefined
+      ; (obj as any).toolCall = null
+      ; (obj as any).startTime = undefined
+      ; (obj as any).duration = undefined
   }
 )
 
@@ -599,10 +599,10 @@ function createUserMessage(
     ...(contexts && contexts.length > 0 && { contexts }),
     ...(contexts &&
       contexts.length > 0 && {
-        contentBlocks: [
-          { type: 'contexts', contexts: contexts as any, timestamp: Date.now() },
-        ] as any,
-      }),
+      contentBlocks: [
+        { type: 'contexts', contexts: contexts as any, timestamp: Date.now() },
+      ] as any,
+    }),
   }
 }
 
@@ -855,11 +855,11 @@ function serializeMessagesForDB(messages: CopilotMessage[]): any[] {
     sample:
       result.length > 0
         ? {
-            role: result[result.length - 1].role,
-            hasContent: !!result[result.length - 1].content,
-            contentBlockCount: result[result.length - 1].contentBlocks?.length || 0,
-            toolCallCount: result[result.length - 1].toolCalls?.length || 0,
-          }
+          role: result[result.length - 1].role,
+          hasContent: !!result[result.length - 1].content,
+          contentBlockCount: result[result.length - 1].contentBlocks?.length || 0,
+          toolCallCount: result[result.length - 1].toolCalls?.length || 0,
+        }
         : null,
   })
 
@@ -1000,7 +1000,7 @@ function beginThinkingBlock(context: StreamingContext) {
     context.currentThinkingBlock.type = THINKING_BLOCK_TYPE
     context.currentThinkingBlock.content = ''
     context.currentThinkingBlock.timestamp = Date.now()
-    ;(context.currentThinkingBlock as any).startTime = Date.now()
+      ; (context.currentThinkingBlock as any).startTime = Date.now()
     context.contentBlocks.push(context.currentThinkingBlock)
   }
   context.isInThinkingBlock = true
@@ -1131,7 +1131,7 @@ const sseHandlers: Record<string, SSEHandler> = {
             if (todoId) {
               get().updatePlanTodoStatus(todoId, 'completed')
             }
-          } catch {}
+          } catch { }
         }
 
         // If mark_todo_in_progress succeeded, set todo executing in planTodos
@@ -1146,7 +1146,7 @@ const sseHandlers: Record<string, SSEHandler> = {
             if (todoId) {
               get().updatePlanTodoStatus(todoId, 'executing')
             }
-          } catch {}
+          } catch { }
         }
       }
 
@@ -1182,7 +1182,7 @@ const sseHandlers: Record<string, SSEHandler> = {
         }
       }
       updateStreamingMessage(set, context)
-    } catch {}
+    } catch { }
   },
   tool_error: (data, context, get, set) => {
     try {
@@ -1244,7 +1244,7 @@ const sseHandlers: Record<string, SSEHandler> = {
         }
       }
       updateStreamingMessage(set, context)
-    } catch {}
+    } catch { }
   },
   tool_generating: (data, context, get, set) => {
     const { toolCallId, toolName } = data
@@ -1287,18 +1287,18 @@ const sseHandlers: Record<string, SSEHandler> = {
     const existing = toolCallsById[id]
     const next: CopilotToolCall = existing
       ? {
-          ...existing,
-          state: ClientToolCallState.pending,
-          ...(args ? { params: args } : {}),
-          display: resolveToolDisplay(name, ClientToolCallState.pending, id, args),
-        }
+        ...existing,
+        state: ClientToolCallState.pending,
+        ...(args ? { params: args } : {}),
+        display: resolveToolDisplay(name, ClientToolCallState.pending, id, args),
+      }
       : {
-          id,
-          name: name || 'unknown_tool',
-          state: ClientToolCallState.pending,
-          ...(args ? { params: args } : {}),
-          display: resolveToolDisplay(name, ClientToolCallState.pending, id, args),
-        }
+        id,
+        name: name || 'unknown_tool',
+        state: ClientToolCallState.pending,
+        ...(args ? { params: args } : {}),
+        display: resolveToolDisplay(name, ClientToolCallState.pending, id, args),
+      }
     const updated = { ...toolCallsById, [id]: next }
     set({ toolCallsById: updated })
     logger.info('[toolCallsById] → pending', { id, name, params: args })
@@ -1398,7 +1398,7 @@ const sseHandlers: Record<string, SSEHandler> = {
                       data: result?.data,
                     }),
                   })
-                } catch {}
+                } catch { }
               })
               .catch((e) => {
                 const errorMap = { ...get().toolCallsById }
@@ -1472,7 +1472,7 @@ const sseHandlers: Record<string, SSEHandler> = {
         }, 0)
         return
       }
-    } catch {}
+    } catch { }
 
     // Integration tools: Stay in pending state until user confirms via buttons
     // This handles tools like google_calendar_*, exa_*, gmail_read, etc. that aren't in the client registry
@@ -1752,10 +1752,10 @@ const sseHandlers: Record<string, SSEHandler> = {
       messages: state.messages.map((msg) =>
         msg.id === context.messageId
           ? {
-              ...msg,
-              content: context.accumulatedContent || 'An error occurred.',
-              error: data.error,
-            }
+            ...msg,
+            content: context.accumulatedContent || 'An error occurred.',
+            error: data.error,
+          }
           : msg
       ),
     }))
@@ -1773,7 +1773,7 @@ const sseHandlers: Record<string, SSEHandler> = {
     finalizeThinkingBlock(context)
     updateStreamingMessage(set, context)
   },
-  default: () => {},
+  default: () => { },
 }
 
 /**
@@ -2198,7 +2198,7 @@ async function* parseSSEStream(
 // Initial state (subset required for UI/streaming)
 const initialState = {
   mode: 'build' as const,
-  selectedModel: 'claude-4.5-opus' as CopilotStore['selectedModel'],
+  selectedModel: 'deepseek-r1' as CopilotStore['selectedModel'],
   agentPrefetch: false,
   enabledModels: null as string[] | null, // Null means not loaded yet, empty array means all disabled
   isCollapsed: false,
@@ -2255,7 +2255,7 @@ export const useCopilotStore = create<CopilotStore>()(
       abortAllInProgressTools(set, get)
       try {
         useWorkflowDiffStore.getState().clearDiff({ restoreBaseline: false })
-      } catch {}
+      } catch { }
 
       set({
         ...initialState,
@@ -2289,7 +2289,7 @@ export const useCopilotStore = create<CopilotStore>()(
       abortAllInProgressTools(set, get)
       try {
         useWorkflowDiffStore.getState().clearDiff({ restoreBaseline: false })
-      } catch {}
+      } catch { }
 
       // Restore plan content and config (mode/model) from selected chat
       const planArtifact = chat.planArtifact || ''
@@ -2343,9 +2343,9 @@ export const useCopilotStore = create<CopilotStore>()(
                 model: previousModel,
               },
             }),
-          }).catch(() => {})
+          }).catch(() => { })
         }
-      } catch {}
+      } catch { }
 
       // Refresh selected chat from server to ensure we have latest messages/tool calls
       try {
@@ -2368,10 +2368,10 @@ export const useCopilotStore = create<CopilotStore>()(
             })
             try {
               await get().loadMessageCheckpoints(latestChat.id)
-            } catch {}
+            } catch { }
           }
         }
-      } catch {}
+      } catch { }
     },
 
     createNewChat: async () => {
@@ -2382,7 +2382,7 @@ export const useCopilotStore = create<CopilotStore>()(
       abortAllInProgressTools(set, get)
       try {
         useWorkflowDiffStore.getState().clearDiff({ restoreBaseline: false })
-      } catch {}
+      } catch { }
 
       // Background-save the current chat before clearing (optimistic)
       try {
@@ -2402,9 +2402,9 @@ export const useCopilotStore = create<CopilotStore>()(
                 model: selectedModel,
               },
             }),
-          }).catch(() => {})
+          }).catch(() => { })
         }
-      } catch {}
+      } catch { }
 
       set({
         currentChat: null,
@@ -2505,7 +2505,7 @@ export const useCopilotStore = create<CopilotStore>()(
               }
               try {
                 await get().loadMessageCheckpoints(updatedCurrentChat.id)
-              } catch {}
+              } catch { }
             } else if (!isSendingMessage && !suppressAutoSelect) {
               const mostRecentChat: CopilotChat = data.chats[0]
               const normalizedMessages = normalizeMessagesForUI(mostRecentChat.messages || [])
@@ -2535,7 +2535,7 @@ export const useCopilotStore = create<CopilotStore>()(
               })
               try {
                 await get().loadMessageCheckpoints(mostRecentChat.id)
-              } catch {}
+              } catch { }
             }
           } else {
             set({ currentChat: null, messages: [] })
@@ -2646,8 +2646,8 @@ export const useCopilotStore = create<CopilotStore>()(
             : state.currentChat,
           chats: state.currentChat
             ? state.chats.map((c) =>
-                c.id === state.currentChat!.id ? { ...c, title: optimisticTitle } : c
-              )
+              c.id === state.currentChat!.id ? { ...c, title: optimisticTitle } : c
+            )
             : state.chats,
         }))
       }
@@ -2660,14 +2660,14 @@ export const useCopilotStore = create<CopilotStore>()(
             contextsCount: Array.isArray(contexts) ? contexts.length : 0,
             contextsPreview: Array.isArray(contexts)
               ? contexts.map((c: any) => ({
-                  kind: c?.kind,
-                  chatId: (c as any)?.chatId,
-                  workflowId: (c as any)?.workflowId,
-                  label: (c as any)?.label,
-                }))
+                kind: c?.kind,
+                chatId: (c as any)?.chatId,
+                workflowId: (c as any)?.workflowId,
+                label: (c as any)?.label,
+              }))
               : undefined,
           })
-        } catch {}
+        } catch { }
 
         // Prepend design document to message if available
         const { streamingPlanContent } = get()
@@ -2792,18 +2792,18 @@ export const useCopilotStore = create<CopilotStore>()(
           const nextContentBlocks = suppressContinueOption
             ? (lastMessage.contentBlocks ?? [])
             : appendContinueOptionBlock(
-                lastMessage.contentBlocks ? [...lastMessage.contentBlocks] : []
-              )
+              lastMessage.contentBlocks ? [...lastMessage.contentBlocks] : []
+            )
           set((state) => ({
             messages: state.messages.map((msg) =>
               msg.id === lastMessage.id
                 ? {
-                    ...msg,
-                    content: suppressContinueOption
-                      ? textContent.trim() || 'Message was aborted'
-                      : appendContinueOption(textContent.trim() || 'Message was aborted'),
-                    contentBlocks: nextContentBlocks,
-                  }
+                  ...msg,
+                  content: suppressContinueOption
+                    ? textContent.trim() || 'Message was aborted'
+                    : appendContinueOption(textContent.trim() || 'Message was aborted'),
+                  contentBlocks: nextContentBlocks,
+                }
                 : msg
             ),
             isSendingMessage: false,
@@ -2840,8 +2840,8 @@ export const useCopilotStore = create<CopilotStore>()(
                   model: selectedModel,
                 },
               }),
-            }).catch(() => {})
-          } catch {}
+            }).catch(() => { })
+          } catch { }
         }
       } catch {
         set({ isSendingMessage: false, isAborting: false })
@@ -2935,7 +2935,7 @@ export const useCopilotStore = create<CopilotStore>()(
           display: resolveToolDisplay(current.name, norm, id, current.params),
         }
         set({ toolCallsById: map })
-      } catch {}
+      } catch { }
     },
 
     updateToolCallParams: (toolCallId: string, params: Record<string, any>) => {
@@ -2951,7 +2951,7 @@ export const useCopilotStore = create<CopilotStore>()(
           display: resolveToolDisplay(current.name, current.state, toolCallId, updatedParams),
         }
         set({ toolCallsById: map })
-      } catch {}
+      } catch { }
     },
     updatePreviewToolCallState: (
       toolCallState: 'accepted' | 'rejected' | 'error',
@@ -3057,15 +3057,15 @@ export const useCopilotStore = create<CopilotStore>()(
                   : 500,
             message: toolCallState,
           }),
-        }).catch(() => {})
-      } catch {}
+        }).catch(() => { })
+      } catch { }
     },
 
     sendDocsMessage: async (query: string) => {
       await get().sendMessage(query)
     },
 
-    saveChatMessages: async (_chatId: string) => {},
+    saveChatMessages: async (_chatId: string) => { },
 
     loadCheckpoints: async (_chatId: string) => set({ checkpoints: [] }),
 
@@ -3121,7 +3121,7 @@ export const useCopilotStore = create<CopilotStore>()(
           // Clear any active diff preview
           try {
             useWorkflowDiffStore.getState().clearDiff()
-          } catch {}
+          } catch { }
 
           // Apply to main workflow store
           useWorkflowStore.setState({
@@ -3373,19 +3373,19 @@ export const useCopilotStore = create<CopilotStore>()(
           const nextSnapshots =
             snapshotId && state.messageSnapshots[snapshotId]
               ? (() => {
-                  const updated = { ...state.messageSnapshots }
-                  delete updated[snapshotId]
-                  return updated
-                })()
+                const updated = { ...state.messageSnapshots }
+                delete updated[snapshotId]
+                return updated
+              })()
               : state.messageSnapshots
           return {
             messages: state.messages.map((msg) =>
               msg.id === assistantMessageId
                 ? {
-                    ...msg,
-                    content: finalContentWithOptions,
-                    contentBlocks: sanitizedContentBlocks,
-                  }
+                  ...msg,
+                  content: finalContentWithOptions,
+                  contentBlocks: sanitizedContentBlocks,
+                }
                 : msg
             ),
             isSendingMessage: false,
@@ -3485,7 +3485,7 @@ export const useCopilotStore = create<CopilotStore>()(
         // Post copilot_stats record (input/output tokens can be null for now)
         try {
           // Removed: stats sending now occurs only on accept/reject with minimal payload
-        } catch {}
+        } catch { }
 
         // Invalidate subscription queries to update usage
         setTimeout(() => {
@@ -3518,7 +3518,7 @@ export const useCopilotStore = create<CopilotStore>()(
       abortAllInProgressTools(set, get)
       try {
         useWorkflowDiffStore.getState().clearDiff()
-      } catch {}
+      } catch { }
 
       set({
         currentChat: newChat,
@@ -3535,7 +3535,7 @@ export const useCopilotStore = create<CopilotStore>()(
     clearError: () => set({ error: null }),
     clearSaveError: () => set({ saveError: null }),
     clearCheckpointError: () => set({ checkpointError: null }),
-    retrySave: async (_chatId: string) => {},
+    retrySave: async (_chatId: string) => { },
 
     cleanup: () => {
       const { isSendingMessage } = get()
@@ -3548,7 +3548,7 @@ export const useCopilotStore = create<CopilotStore>()(
       // Clear any diff on cleanup
       try {
         useWorkflowDiffStore.getState().clearDiff()
-      } catch {}
+      } catch { }
     },
 
     reset: () => {
@@ -3743,12 +3743,12 @@ export const useCopilotStore = create<CopilotStore>()(
               data: success
                 ? result.result?.output
                 : {
-                    error: result.result?.error || result.error,
-                    output: result.result?.output,
-                  },
+                  error: result.result?.error || result.error,
+                  output: result.result?.output,
+                },
             }),
           })
-        } catch {}
+        } catch { }
       } catch (e) {
         const errorMap = { ...get().toolCallsById }
         // Do not override terminal review/rejected
@@ -3797,7 +3797,7 @@ export const useCopilotStore = create<CopilotStore>()(
           message: 'Tool execution skipped by user',
           data: { skipped: true },
         }),
-      }).catch(() => {})
+      }).catch(() => { })
     },
 
     loadAutoAllowedTools: async () => {
@@ -3977,4 +3977,4 @@ try {
     }
     useCopilotStore.setState({ toolCallsById: updated })
   })
-} catch {}
+} catch { }

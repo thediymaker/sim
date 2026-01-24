@@ -51,19 +51,19 @@ export async function getKnowledgeBases(
         isNull(knowledgeBase.deletedAt),
         workspaceId
           ? // When filtering by workspace
-            or(
-              // Knowledge bases belonging to the specified workspace (user must have workspace permissions)
-              and(eq(knowledgeBase.workspaceId, workspaceId), isNotNull(permissions.userId)),
-              // Fallback: User-owned knowledge bases without workspace (legacy)
-              and(eq(knowledgeBase.userId, userId), isNull(knowledgeBase.workspaceId))
-            )
+          or(
+            // Knowledge bases belonging to the specified workspace (user must have workspace permissions)
+            and(eq(knowledgeBase.workspaceId, workspaceId), isNotNull(permissions.userId)),
+            // Fallback: User-owned knowledge bases without workspace (legacy)
+            and(eq(knowledgeBase.userId, userId), isNull(knowledgeBase.workspaceId))
+          )
           : // When not filtering by workspace, use original logic
-            or(
-              // User owns the knowledge base directly
-              eq(knowledgeBase.userId, userId),
-              // User has permissions on the knowledge base's workspace
-              isNotNull(permissions.userId)
-            )
+          or(
+            // User owns the knowledge base directly
+            eq(knowledgeBase.userId, userId),
+            // User has permissions on the knowledge base's workspace
+            isNotNull(permissions.userId)
+          )
       )
     )
     .groupBy(knowledgeBase.id)
@@ -166,8 +166,9 @@ export async function updateKnowledgeBase(
   if (updates.workspaceId !== undefined) updateData.workspaceId = updates.workspaceId
   if (updates.chunkingConfig !== undefined) {
     updateData.chunkingConfig = updates.chunkingConfig
-    updateData.embeddingModel = 'text-embedding-3-small'
-    updateData.embeddingDimension = 1536
+    // Refrain from resetting embedding model/dimension hardcodedly
+    // updateData.embeddingModel = 'text-embedding-3-small'
+    // updateData.embeddingDimension = 1536
   }
 
   await db.update(knowledgeBase).set(updateData).where(eq(knowledgeBase.id, knowledgeBaseId))

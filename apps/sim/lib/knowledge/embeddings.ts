@@ -64,6 +64,7 @@ async function getEmbeddingConfig(
   }
 
   let openaiApiKey = env.OPENAI_API_KEY
+  const baseUrl = env.OPENAI_BASE_URL || env.LITELLM_BASE_URL
 
   if (workspaceId) {
     const byokResult = await getBYOKKey(workspaceId, 'openai')
@@ -73,20 +74,25 @@ async function getEmbeddingConfig(
     }
   }
 
-  if (!openaiApiKey) {
+  if (!openaiApiKey && !baseUrl) { // If baseUrl is set, we might not need key if it's local
+    // But usually auth is required or ignored. Let's allow if baseUrl is set
     throw new Error(
-      'Either OPENAI_API_KEY or Azure OpenAI configuration (AZURE_OPENAI_API_KEY + AZURE_OPENAI_ENDPOINT) must be configured'
+      'Either OPENAI_API_KEY or Azure OpenAI configuration (AZURE_OPENAI_API_KEY + AZURE_OPENAI_ENDPOINT) or OPENAI_BASE_URL must be configured'
     )
   }
 
+  const apiUrl = baseUrl
+    ? `${baseUrl.replace(/\/$/, '')}/embeddings` // Assume base is .../v1
+    : 'https://api.openai.com/v1/embeddings'
+
   return {
     useAzure: false,
-    apiUrl: 'https://api.openai.com/v1/embeddings',
+    apiUrl,
     headers: {
-      Authorization: `Bearer ${openaiApiKey}`,
+      Authorization: `Bearer ${openaiApiKey || 'sk-dummy'}`, // Default dummy if local
       'Content-Type': 'application/json',
     },
-    modelName: embeddingModel,
+    modelName: kbModelName,
   }
 }
 
@@ -95,14 +101,14 @@ async function callEmbeddingAPI(inputs: string[], config: EmbeddingConfig): Prom
     async () => {
       const requestBody = config.useAzure
         ? {
-            input: inputs,
-            encoding_format: 'float',
-          }
+          input: inputs,
+          encoding_format: 'float',
+        }
         : {
-            input: inputs,
-            model: config.modelName,
-            encoding_format: 'float',
-          }
+          input: inputs,
+          model: config.modelName,
+          encoding_format: 'float',
+        }
 
       const response = await fetch(config.apiUrl, {
         method: 'POST',

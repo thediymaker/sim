@@ -20,8 +20,8 @@ const CreateKnowledgeBaseSchema = z.object({
   name: z.string().min(1, 'Name is required'),
   description: z.string().optional(),
   workspaceId: z.string().optional(),
-  embeddingModel: z.literal('text-embedding-3-small').default('text-embedding-3-small'),
-  embeddingDimension: z.literal(1536).default(1536),
+  embeddingModel: z.string().default('text-embedding-3-small'),
+  embeddingDimension: z.number().default(1536),
   chunkingConfig: z
     .object({
       /** Maximum chunk size in tokens (1 token ≈ 4 characters) */

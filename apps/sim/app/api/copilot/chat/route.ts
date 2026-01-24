@@ -41,7 +41,7 @@ const ChatMessageSchema = z.object({
   userMessageId: z.string().optional(), // ID from frontend for the user message
   chatId: z.string().optional(),
   workflowId: z.string().min(1, 'Workflow ID is required'),
-model: z.enum(COPILOT_MODEL_IDS).optional().default('claude-4.5-opus'),
+  model: z.string().optional().default('qwen3-30b-a3b-thinking-2507'),
   mode: z.enum(COPILOT_REQUEST_MODES).optional().default('agent'),
   prefetch: z.boolean().optional(),
   createNewChat: z.boolean().optional().default(false),
@@ -121,15 +121,15 @@ export async function POST(req: NextRequest) {
         contextsCount: Array.isArray(contexts) ? contexts.length : 0,
         contextsPreview: Array.isArray(contexts)
           ? contexts.map((c: any) => ({
-              kind: c?.kind,
-              chatId: c?.chatId,
-              workflowId: c?.workflowId,
-              executionId: (c as any)?.executionId,
-              label: c?.label,
-            }))
+            kind: c?.kind,
+            chatId: c?.chatId,
+            workflowId: c?.workflowId,
+            executionId: (c as any)?.executionId,
+            label: c?.label,
+          }))
           : undefined,
       })
-    } catch {}
+    } catch { }
     // Preprocess contexts server-side
     let agentContexts: Array<{ type: string; content: string }> = []
     if (Array.isArray(contexts) && contexts.length > 0) {
@@ -463,8 +463,137 @@ export async function POST(req: NextRequest) {
         baseToolCount: baseTools.length,
         hasCredentials: !!credentials,
       })
-    } catch {}
+    } catch { }
 
+    // --------------------------------------------------------------------------
+    // LITELLM PROXY BYPASS
+    // --------------------------------------------------------------------------
+    // If a LiteLLM Base URL is configured, and the provider is either 'litellm'
+    // or we decide to route all traffic there (simplification for this use case),
+    // we bypass the Sim Agent and call LiteLLM directly.
+
+    // Check if we should use LiteLLM proxy
+    // We use it if LITELLM_BASE_URL is set.
+    // We could be stricter and check providerConfig?.provider === 'litellm'
+    // but the frontend logic might default to 'openai' if not explicitly set.
+    // Given the user wants to use their own models, we prioritize the local config.
+    const useLiteLLM = !!(env.LITELLM_BASE_URL)
+
+    if (useLiteLLM) {
+      logger.info(`[${tracker.requestId}] Proxying to LiteLLM: ${env.LITELLM_BASE_URL}`)
+      try {
+        const OpenAI = require('openai').default
+        const openai = new OpenAI({
+          baseURL: env.LITELLM_BASE_URL,
+          apiKey: env.LITELLM_API_KEY || 'sk-placeholder', // LiteLLM proxy usually needs a key, even if dummy
+        })
+
+        // Construct messages with history
+        const openaiMessages = messages.map(m => ({
+          role: m.role,
+          content: m.content
+        }))
+
+        // ----------------------------------------------------------------------
+        // CONTEXT INJECTION
+        // ----------------------------------------------------------------------
+        // Inject system prompt and agent contexts (workflows, docs, etc.)
+        let systemPrompt = `You are Sim Copilot, an expert AI assistant for SimStudio.
+SimStudio is a drag-and-drop workflow automation platform (similar to Zapier/n8n but more flexible).
+User is asking questions about their workflows, blocks, or execution logs.
+
+Answer concisely and accurately based on the provided context.
+If no context is provided, rely on your general knowledge but mention you lack specific context about their workflow.`
+
+        if (agentContexts.length > 0) {
+          systemPrompt += `\n\n### Current Context:\n`
+          for (const ctx of agentContexts) {
+            systemPrompt += `\n--- [${ctx.type}] ${ctx.tag || ''} ---\n${ctx.content}\n`
+          }
+        }
+
+        // Prepend system message
+        openaiMessages.unshift({
+          role: 'system',
+          content: systemPrompt
+        })
+
+        // Strip litellm/ prefix if present, as LiteLLM expects the clean model name
+        const cleanModel = selectedModel.startsWith('litellm/')
+          ? selectedModel.slice('litellm/'.length)
+          : selectedModel
+
+        logger.info(`[${tracker.requestId}] Sending request to LiteLLM Proxy`, {
+          url: env.LITELLM_BASE_URL,
+          model: cleanModel,
+          messageCount: openaiMessages.length,
+          stream: true
+        })
+
+        const completion = await openai.chat.completions.create({
+          model: cleanModel,
+          messages: openaiMessages,
+          stream: true,
+        })
+
+        logger.info(`[${tracker.requestId}] Received LiteLLM response stream`)
+
+        // Transform Stream
+        const encoder = new TextEncoder()
+        const stream = new ReadableStream({
+          async start(controller) {
+            try {
+              if (actualChatId) {
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'chat_id', chatId: actualChatId })}\n\n`))
+              }
+
+              let assistantContent = ''
+              let chunkCount = 0
+
+              for await (const chunk of completion) {
+                chunkCount++
+                const content = chunk.choices[0]?.delta?.content
+                if (content) {
+                  assistantContent += content
+                  controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'content', data: content })}\n\n`))
+                }
+              }
+
+              logger.info(`[${tracker.requestId}] Stream completed`, {
+                chunkCount,
+                contentLength: assistantContent.length
+              })
+
+              // Send done event
+              // We use a generated responseId since we don't have one from Sim Agent/LiteLLM usually
+              const responseId = crypto.randomUUID()
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'done', data: { responseId } })}\n\n`))
+
+            } catch (e) {
+              logger.error(`[${tracker.requestId}] LiteLLM Stream Error`, e)
+              const errMsg = e instanceof Error ? e.message : 'Unknown stream error'
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'error', data: { displayMessage: errMsg } })}\n\n`))
+            } finally {
+              controller.close()
+            }
+          }
+        })
+
+        return new NextResponse(stream, {
+          headers: {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+          }
+        })
+
+      } catch (error) {
+        logger.error(`[${tracker.requestId}] LiteLLM Proxy Error`, error)
+        return createInternalServerErrorResponse(`LiteLLM Error: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+
+    // Fallback to original Sim Agent call if not using LiteLLM
     const simAgentResponse = await fetch(`${SIM_AGENT_API_URL}/api/chat-completion-streaming`, {
       method: 'POST',
       headers: {
@@ -504,8 +633,8 @@ export async function POST(req: NextRequest) {
         ...(Array.isArray(contexts) && contexts.length > 0 && { contexts }),
         ...(Array.isArray(contexts) &&
           contexts.length > 0 && {
-            contentBlocks: [{ type: 'contexts', contexts: contexts as any, timestamp: Date.now() }],
-          }),
+          contentBlocks: [{ type: 'contexts', contexts: contexts as any, timestamp: Date.now() }],
+        }),
       }
 
       // Create a pass-through stream that captures the response
@@ -703,7 +832,7 @@ export async function POST(req: NextRequest) {
                           reader.cancel()
                           break
                         }
-                      } catch {}
+                      } catch { }
                       // Do not forward the original error event
                     } else {
                       // Forward original event to client
@@ -907,8 +1036,8 @@ export async function POST(req: NextRequest) {
         ...(Array.isArray(contexts) && contexts.length > 0 && { contexts }),
         ...(Array.isArray(contexts) &&
           contexts.length > 0 && {
-            contentBlocks: [{ type: 'contexts', contexts: contexts as any, timestamp: Date.now() }],
-          }),
+          contentBlocks: [{ type: 'contexts', contexts: contexts as any, timestamp: Date.now() }],
+        }),
       }
 
       const assistantMessage = {

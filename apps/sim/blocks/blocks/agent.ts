@@ -128,15 +128,16 @@ Return ONLY the JSON array.`,
       type: 'combobox',
       placeholder: 'Type or select a model...',
       required: true,
-      defaultValue: 'claude-sonnet-4-5',
+      defaultValue: '',
       options: () => {
         const providersState = useProvidersStore.getState()
         const baseModels = providersState.providers.base.models
         const ollamaModels = providersState.providers.ollama.models
         const vllmModels = providersState.providers.vllm.models
         const openrouterModels = providersState.providers.openrouter.models
+        const litellmModels = providersState.providers.litellm.models
         const allModels = Array.from(
-          new Set([...baseModels, ...ollamaModels, ...vllmModels, ...openrouterModels])
+          new Set([...baseModels, ...ollamaModels, ...vllmModels, ...openrouterModels, ...litellmModels])
         )
 
         return allModels.map((model) => {
@@ -417,20 +418,20 @@ Return ONLY the JSON array.`,
       // Hide API key for hosted models, Ollama models, vLLM models, Vertex models (uses OAuth), and Bedrock (uses AWS credentials)
       condition: isHosted
         ? {
-            field: 'model',
-            value: [...getHostedModels(), ...providers.vertex.models, ...providers.bedrock.models],
-            not: true, // Show for all models EXCEPT those listed
-          }
+          field: 'model',
+          value: [...getHostedModels(), ...providers.vertex.models, ...providers.bedrock.models],
+          not: true, // Show for all models EXCEPT those listed
+        }
         : () => ({
-            field: 'model',
-            value: [
-              ...getCurrentOllamaModels(),
-              ...getCurrentVLLMModels(),
-              ...providers.vertex.models,
-              ...providers.bedrock.models,
-            ],
-            not: true, // Show for all models EXCEPT Ollama, vLLM, Vertex, and Bedrock models
-          }),
+          field: 'model',
+          value: [
+            ...getCurrentOllamaModels(),
+            ...getCurrentVLLMModels(),
+            ...providers.vertex.models,
+            ...providers.bedrock.models,
+          ],
+          not: true, // Show for all models EXCEPT Ollama, vLLM, Vertex, and Bedrock models
+        }),
     },
     {
       id: 'memoryType',
@@ -623,7 +624,7 @@ Example 3 (Array Input):
     ],
     config: {
       tool: (params: Record<string, any>) => {
-        const model = params.model || 'claude-sonnet-4-5'
+        const model = params.model || ''
         if (!model) {
           throw new Error('No model selected')
         }

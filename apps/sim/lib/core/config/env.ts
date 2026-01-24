@@ -75,6 +75,7 @@ export const env = createEnv({
     OPENAI_API_KEY_1: z.string().min(1).optional(),           // Additional OpenAI API key for load balancing
     OPENAI_API_KEY_2: z.string().min(1).optional(),           // Additional OpenAI API key for load balancing
     OPENAI_API_KEY_3: z.string().min(1).optional(),           // Additional OpenAI API key for load balancing
+    OPENAI_BASE_URL: z.string().url().optional(),             // Base URL for OpenAI API (e.g. for vLLM/embeddings)
     MISTRAL_API_KEY: z.string().min(1).optional(),           // Mistral AI API key
     ANTHROPIC_API_KEY_1: z.string().min(1).optional(),           // Primary Anthropic Claude API key
     ANTHROPIC_API_KEY_2: z.string().min(1).optional(),           // Additional Anthropic API key for load balancing
