@@ -11,10 +11,12 @@ import {
   customSession,
   emailOTP,
   genericOAuth,
+  jwt,
+  oidcProvider,
   oneTimeToken,
   organization,
 } from 'better-auth/plugins'
-import { and, eq } from 'drizzle-orm'
+import { and, eq, inArray, sql } from 'drizzle-orm'
 import { headers } from 'next/headers'
 import Stripe from 'stripe'
 import {
@@ -23,6 +25,12 @@ import {
   renderPasswordResetEmail,
   renderWelcomeEmail,
 } from '@/components/emails'
+import {
+  evictCachedMetadata,
+  isMetadataUrl,
+  resolveClientMetadata,
+  upsertCimdClient,
+} from '@/lib/auth/cimd'
 import { sendPlanWelcomeEmail } from '@/lib/billing'
 import { authorizeSubscriptionReference } from '@/lib/billing/authorization'
 import { handleNewUser } from '@/lib/billing/core/usage'
@@ -30,7 +38,7 @@ import {
   ensureOrganizationForTeamSubscription,
   syncSubscriptionUsageLimits,
 } from '@/lib/billing/organization'
-import { getPlans } from '@/lib/billing/plans'
+import { getPlans, resolvePlanFromStripeSubscription } from '@/lib/billing/plans'
 import { syncSeatsFromStripeQuantity } from '@/lib/billing/validation/seat-management'
 import { handleChargeDispute, handleDisputeClosed } from '@/lib/billing/webhooks/disputes'
 import { handleManualEnterpriseSubscription } from '@/lib/billing/webhooks/enterprise'
@@ -55,12 +63,16 @@ import {
 } from '@/lib/core/config/feature-flags'
 import { PlatformEvents } from '@/lib/core/telemetry'
 import { getBaseUrl } from '@/lib/core/utils/urls'
+import {
+  handleCreateCredentialFromDraft,
+  handleReconnectCredential,
+} from '@/lib/credentials/draft-hooks'
 import { sendEmail } from '@/lib/messaging/email/mailer'
 import { getFromEmailAddress, getPersonalEmailFrom } from '@/lib/messaging/email/utils'
 import { quickValidateEmail } from '@/lib/messaging/email/validation'
 import { syncAllWebhooksForCredentialSet } from '@/lib/webhooks/utils.server'
+import { SSO_TRUSTED_PROVIDERS } from '@/ee/sso/constants'
 import { createAnonymousSession, ensureAnonymousUserExists } from './anonymous'
-import { SSO_TRUSTED_PROVIDERS } from './sso/constants'
 
 const logger = createLogger('Auth')
 
@@ -80,6 +92,8 @@ export const auth = betterAuth({
   trustedOrigins: [
     getBaseUrl(),
     ...(env.NEXT_PUBLIC_SOCKET_URL ? [env.NEXT_PUBLIC_SOCKET_URL] : []),
+    'https://claude.ai',
+    'https://claude.com',
   ].filter(Boolean),
   database: drizzleAdapter(db, {
     provider: 'pg',
@@ -150,112 +164,161 @@ export const auth = betterAuth({
     account: {
       create: {
         before: async (account) => {
-          // Only one credential per (userId, providerId) is allowed
-          // If user reconnects (even with a different external account), replace the existing one
-          const existing = await db.query.account.findFirst({
-            where: and(
-              eq(schema.account.userId, account.userId),
-              eq(schema.account.providerId, account.providerId)
-            ),
-          })
+          const modifiedAccount = { ...account }
 
-          if (existing) {
-            let scopeToStore = account.scope
-
-            if (account.providerId === 'salesforce' && account.accessToken) {
-              try {
-                const response = await fetch(
-                  'https://login.salesforce.com/services/oauth2/userinfo',
-                  {
-                    headers: {
-                      Authorization: `Bearer ${account.accessToken}`,
-                    },
-                  }
-                )
-
-                if (response.ok) {
-                  const data = await response.json()
-
-                  if (data.profile) {
-                    const match = data.profile.match(/^(https:\/\/[^/]+)/)
-                    if (match && match[1] !== 'https://login.salesforce.com') {
-                      const instanceUrl = match[1]
-                      scopeToStore = `__sf_instance__:${instanceUrl} ${account.scope}`
-                    }
-                  }
+          if (account.providerId === 'salesforce' && account.accessToken) {
+            try {
+              const response = await fetch(
+                'https://login.salesforce.com/services/oauth2/userinfo',
+                {
+                  headers: {
+                    Authorization: `Bearer ${account.accessToken}`,
+                  },
                 }
-              } catch (error) {
-                logger.error('Failed to fetch Salesforce instance URL', { error })
-              }
-            }
-
-            const refreshTokenExpiresAt = isMicrosoftProvider(account.providerId)
-              ? getMicrosoftRefreshTokenExpiry()
-              : account.refreshTokenExpiresAt
-
-            await db
-              .update(schema.account)
-              .set({
-                accountId: account.accountId,
-                accessToken: account.accessToken,
-                refreshToken: account.refreshToken,
-                idToken: account.idToken,
-                accessTokenExpiresAt: account.accessTokenExpiresAt,
-                refreshTokenExpiresAt,
-                scope: scopeToStore,
-                updatedAt: new Date(),
-              })
-              .where(eq(schema.account.id, existing.id))
-
-            // Sync webhooks for credential sets after reconnecting
-            const requestId = crypto.randomUUID().slice(0, 8)
-            const userMemberships = await db
-              .select({
-                credentialSetId: schema.credentialSetMember.credentialSetId,
-                providerId: schema.credentialSet.providerId,
-              })
-              .from(schema.credentialSetMember)
-              .innerJoin(
-                schema.credentialSet,
-                eq(schema.credentialSetMember.credentialSetId, schema.credentialSet.id)
-              )
-              .where(
-                and(
-                  eq(schema.credentialSetMember.userId, account.userId),
-                  eq(schema.credentialSetMember.status, 'active')
-                )
               )
 
-            for (const membership of userMemberships) {
-              if (membership.providerId === account.providerId) {
-                try {
-                  await syncAllWebhooksForCredentialSet(membership.credentialSetId, requestId)
-                  logger.info(
-                    '[account.create.before] Synced webhooks after credential reconnect',
-                    {
-                      credentialSetId: membership.credentialSetId,
-                      providerId: account.providerId,
-                    }
-                  )
-                } catch (error) {
-                  logger.error(
-                    '[account.create.before] Failed to sync webhooks after credential reconnect',
-                    {
-                      credentialSetId: membership.credentialSetId,
-                      providerId: account.providerId,
-                      error,
-                    }
-                  )
+              if (response.ok) {
+                const data = await response.json()
+
+                if (data.profile) {
+                  const match = data.profile.match(/^(https:\/\/[^/]+)/)
+                  if (match && match[1] !== 'https://login.salesforce.com') {
+                    const instanceUrl = match[1]
+                    modifiedAccount.scope = `__sf_instance__:${instanceUrl} ${account.scope}`
+                  }
                 }
               }
+            } catch (error) {
+              logger.error('Failed to fetch Salesforce instance URL', { error })
             }
-
-            return false
           }
 
-          return { data: account }
+          if (isMicrosoftProvider(account.providerId)) {
+            modifiedAccount.refreshTokenExpiresAt = getMicrosoftRefreshTokenExpiry()
+          }
+
+          return { data: modifiedAccount }
         },
         after: async (account) => {
+          /**
+           * Migrate credentials from stale account rows to the newly created one.
+           *
+           * Each getUserInfo appends a random UUID to the stable external ID so
+           * that Better Auth never blocks cross-user connections. This means
+           * re-connecting the same external identity creates a new row. We detect
+           * the stale siblings here by comparing the stable prefix (everything
+           * before the trailing UUID), migrate any credential FKs to the new row,
+           * then delete the stale rows.
+           */
+          try {
+            const UUID_SUFFIX_RE = /-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+            const stablePrefix = account.accountId.replace(UUID_SUFFIX_RE, '')
+
+            if (stablePrefix && stablePrefix !== account.accountId) {
+              const siblings = await db
+                .select({ id: schema.account.id, accountId: schema.account.accountId })
+                .from(schema.account)
+                .where(
+                  and(
+                    eq(schema.account.userId, account.userId),
+                    eq(schema.account.providerId, account.providerId),
+                    sql`${schema.account.id} != ${account.id}`
+                  )
+                )
+
+              const staleRows = siblings.filter(
+                (row) => row.accountId.replace(UUID_SUFFIX_RE, '') === stablePrefix
+              )
+
+              if (staleRows.length > 0) {
+                const staleIds = staleRows.map((row) => row.id)
+
+                await db
+                  .update(schema.credential)
+                  .set({ accountId: account.id })
+                  .where(inArray(schema.credential.accountId, staleIds))
+
+                await db.delete(schema.account).where(inArray(schema.account.id, staleIds))
+
+                logger.info('[account.create.after] Migrated credentials from stale accounts', {
+                  userId: account.userId,
+                  providerId: account.providerId,
+                  newAccountId: account.id,
+                  migratedFrom: staleIds,
+                })
+              }
+            }
+          } catch (error) {
+            logger.error('[account.create.after] Failed to clean up stale accounts', {
+              userId: account.userId,
+              providerId: account.providerId,
+              error,
+            })
+          }
+
+          /**
+           * If a pending credential draft exists for this (userId, providerId),
+           * either create a new credential or reconnect an existing one.
+           *
+           * - draft.credentialId is null: create a new credential (normal connect flow)
+           * - draft.credentialId is set: update existing credential's accountId (reconnect flow)
+           */
+          try {
+            const [draft] = await db
+              .select()
+              .from(schema.pendingCredentialDraft)
+              .where(
+                and(
+                  eq(schema.pendingCredentialDraft.userId, account.userId),
+                  eq(schema.pendingCredentialDraft.providerId, account.providerId),
+                  sql`${schema.pendingCredentialDraft.expiresAt} > NOW()`
+                )
+              )
+              .limit(1)
+
+            if (draft) {
+              const now = new Date()
+
+              if (draft.credentialId) {
+                await handleReconnectCredential({
+                  draft,
+                  newAccountId: account.id,
+                  workspaceId: draft.workspaceId,
+                  now,
+                })
+              } else {
+                await handleCreateCredentialFromDraft({
+                  draft,
+                  accountId: account.id,
+                  providerId: account.providerId,
+                  userId: account.userId,
+                  now,
+                })
+              }
+
+              await db
+                .delete(schema.pendingCredentialDraft)
+                .where(eq(schema.pendingCredentialDraft.id, draft.id))
+            }
+          } catch (error) {
+            logger.error('[account.create.after] Failed to process credential draft', {
+              userId: account.userId,
+              providerId: account.providerId,
+              error,
+            })
+          }
+
+          try {
+            const { ensureUserStatsExists } = await import('@/lib/billing/core/usage')
+            await ensureUserStatsExists(account.userId)
+          } catch (error) {
+            logger.error('[databaseHooks.account.create.after] Failed to ensure user stats', {
+              userId: account.userId,
+              accountId: account.id,
+              error,
+            })
+          }
+
           if (account.providerId === 'salesforce') {
             const updates: {
               accessTokenExpiresAt?: Date
@@ -417,14 +480,18 @@ export const auth = betterAuth({
         'spotify',
         'google-email',
         'google-calendar',
+        'google-contacts',
         'google-drive',
         'google-docs',
         'google-sheets',
         'google-forms',
+        'google-bigquery',
         'google-vault',
         'google-groups',
+        'google-tasks',
         'vertex-ai',
         'github-repo',
+        'microsoft-dataverse',
         'microsoft-teams',
         'microsoft-excel',
         'microsoft-planner',
@@ -439,8 +506,10 @@ export const auth = betterAuth({
         'zoom',
         'wordpress',
         'linear',
+        'attio',
         'shopify',
         'trello',
+        'calcom',
         ...SSO_TRUSTED_PROVIDERS,
       ],
     },
@@ -462,7 +531,6 @@ export const auth = betterAuth({
   },
   emailVerification: {
     autoSignInAfterVerification: true,
-    // onEmailVerification is called by the emailOTP plugin when email is verified via OTP
     onEmailVerification: async (user) => {
       if (isHosted && user.email) {
         try {
@@ -513,6 +581,17 @@ export const auth = betterAuth({
         throw new Error(`Failed to send reset password email: ${result.message}`)
       }
     },
+    onPasswordReset: async ({ user: resetUser }) => {
+      const { AuditAction, AuditResourceType, recordAudit } = await import('@/lib/audit/log')
+      recordAudit({
+        actorId: resetUser.id,
+        actorName: resetUser.name,
+        actorEmail: resetUser.email,
+        action: AuditAction.PASSWORD_RESET,
+        resourceType: AuditResourceType.PASSWORD,
+        description: 'Password reset completed',
+      })
+    },
   },
   hooks: {
     before: createAuthMiddleware(async (ctx) => {
@@ -555,11 +634,51 @@ export const auth = betterAuth({
         }
       }
 
+      if (ctx.path === '/oauth2/authorize' || ctx.path === '/oauth2/token') {
+        const clientId = (ctx.query?.client_id ?? ctx.body?.client_id) as string | undefined
+        if (clientId && isMetadataUrl(clientId)) {
+          try {
+            const { metadata, fromCache } = await resolveClientMetadata(clientId)
+            if (!fromCache) {
+              try {
+                await upsertCimdClient(metadata)
+              } catch (upsertErr) {
+                evictCachedMetadata(clientId)
+                throw upsertErr
+              }
+            }
+          } catch (err) {
+            logger.warn('CIMD resolution failed', {
+              clientId,
+              error: err instanceof Error ? err.message : String(err),
+            })
+          }
+        }
+      }
+
       return
     }),
   },
   plugins: [
     nextCookies(),
+    jwt({
+      jwks: {
+        keyPairConfig: { alg: 'RS256' },
+      },
+      disableSettingJwtHeader: true,
+    }),
+    oidcProvider({
+      loginPage: '/login',
+      consentPage: '/oauth/consent',
+      requirePKCE: true,
+      allowPlainCodeChallengeMethod: false,
+      allowDynamicClientRegistration: true,
+      useJWTPlugin: true,
+      scopes: ['openid', 'profile', 'email', 'offline_access', 'mcp:tools'],
+      metadata: {
+        client_id_metadata_document_supported: true,
+      } as Record<string, unknown>,
+    }),
     oneTimeToken({
       expiresIn: 24 * 60 * 60, // 24 hours - Socket.IO handles connection persistence with heartbeats
     }),
@@ -912,6 +1031,45 @@ export const auth = betterAuth({
         },
 
         {
+          providerId: 'google-contacts',
+          clientId: env.GOOGLE_CLIENT_ID as string,
+          clientSecret: env.GOOGLE_CLIENT_SECRET as string,
+          discoveryUrl: 'https://accounts.google.com/.well-known/openid-configuration',
+          accessType: 'offline',
+          scopes: [
+            'https://www.googleapis.com/auth/userinfo.email',
+            'https://www.googleapis.com/auth/userinfo.profile',
+            'https://www.googleapis.com/auth/contacts',
+          ],
+          prompt: 'consent',
+          redirectURI: `${getBaseUrl()}/api/auth/oauth2/callback/google-contacts`,
+          getUserInfo: async (tokens) => {
+            try {
+              const response = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
+                headers: { Authorization: `Bearer ${tokens.accessToken}` },
+              })
+              if (!response.ok) {
+                logger.error('Failed to fetch Google user info', { status: response.status })
+                throw new Error(`Failed to fetch Google user info: ${response.statusText}`)
+              }
+              const profile = await response.json()
+              const now = new Date()
+              return {
+                id: `${profile.sub}-${crypto.randomUUID()}`,
+                name: profile.name || 'Google User',
+                email: profile.email,
+                image: profile.picture || undefined,
+                emailVerified: profile.email_verified || false,
+                createdAt: now,
+                updatedAt: now,
+              }
+            } catch (error) {
+              logger.error('Error in Google getUserInfo', { error })
+              throw error
+            }
+          },
+        },
+        {
           providerId: 'google-forms',
           clientId: env.GOOGLE_CLIENT_ID as string,
           clientSecret: env.GOOGLE_CLIENT_SECRET as string,
@@ -952,6 +1110,46 @@ export const auth = betterAuth({
             }
           },
         },
+        {
+          providerId: 'google-bigquery',
+          clientId: env.GOOGLE_CLIENT_ID as string,
+          clientSecret: env.GOOGLE_CLIENT_SECRET as string,
+          discoveryUrl: 'https://accounts.google.com/.well-known/openid-configuration',
+          accessType: 'offline',
+          scopes: [
+            'https://www.googleapis.com/auth/userinfo.email',
+            'https://www.googleapis.com/auth/userinfo.profile',
+            'https://www.googleapis.com/auth/bigquery',
+          ],
+          prompt: 'consent',
+          redirectURI: `${getBaseUrl()}/api/auth/oauth2/callback/google-bigquery`,
+          getUserInfo: async (tokens) => {
+            try {
+              const response = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
+                headers: { Authorization: `Bearer ${tokens.accessToken}` },
+              })
+              if (!response.ok) {
+                logger.error('Failed to fetch Google user info', { status: response.status })
+                throw new Error(`Failed to fetch Google user info: ${response.statusText}`)
+              }
+              const profile = await response.json()
+              const now = new Date()
+              return {
+                id: `${profile.sub}-${crypto.randomUUID()}`,
+                name: profile.name || 'Google User',
+                email: profile.email,
+                image: profile.picture || undefined,
+                emailVerified: profile.email_verified || false,
+                createdAt: now,
+                updatedAt: now,
+              }
+            } catch (error) {
+              logger.error('Error in Google getUserInfo', { error })
+              throw error
+            }
+          },
+        },
+
         {
           providerId: 'google-vault',
           clientId: env.GOOGLE_CLIENT_ID as string,
@@ -1007,6 +1205,46 @@ export const auth = betterAuth({
           ],
           prompt: 'consent',
           redirectURI: `${getBaseUrl()}/api/auth/oauth2/callback/google-groups`,
+          getUserInfo: async (tokens) => {
+            try {
+              const response = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
+                headers: { Authorization: `Bearer ${tokens.accessToken}` },
+              })
+              if (!response.ok) {
+                logger.error('Failed to fetch Google user info', { status: response.status })
+                throw new Error(`Failed to fetch Google user info: ${response.statusText}`)
+              }
+              const profile = await response.json()
+              const now = new Date()
+              return {
+                id: `${profile.sub}-${crypto.randomUUID()}`,
+                name: profile.name || 'Google User',
+                email: profile.email,
+                image: profile.picture || undefined,
+                emailVerified: profile.email_verified || false,
+                createdAt: now,
+                updatedAt: now,
+              }
+            } catch (error) {
+              logger.error('Error in Google getUserInfo', { error })
+              throw error
+            }
+          },
+        },
+
+        {
+          providerId: 'google-tasks',
+          clientId: env.GOOGLE_CLIENT_ID as string,
+          clientSecret: env.GOOGLE_CLIENT_SECRET as string,
+          discoveryUrl: 'https://accounts.google.com/.well-known/openid-configuration',
+          accessType: 'offline',
+          scopes: [
+            'https://www.googleapis.com/auth/userinfo.email',
+            'https://www.googleapis.com/auth/userinfo.profile',
+            'https://www.googleapis.com/auth/tasks',
+          ],
+          prompt: 'consent',
+          redirectURI: `${getBaseUrl()}/api/auth/oauth2/callback/google-tasks`,
           getUserInfo: async (tokens) => {
             try {
               const response = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
@@ -1169,6 +1407,54 @@ export const auth = betterAuth({
             } catch (error) {
               logger.error('Error in Microsoft getUserInfo', { error })
               throw error
+            }
+          },
+        },
+        {
+          providerId: 'microsoft-dataverse',
+          clientId: env.MICROSOFT_CLIENT_ID as string,
+          clientSecret: env.MICROSOFT_CLIENT_SECRET as string,
+          authorizationUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
+          tokenUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+          userInfoUrl: 'https://graph.microsoft.com/v1.0/me',
+          scopes: [
+            'openid',
+            'profile',
+            'email',
+            'https://dynamics.microsoft.com/user_impersonation',
+            'offline_access',
+          ],
+          responseType: 'code',
+          accessType: 'offline',
+          authentication: 'basic',
+          pkce: true,
+          redirectURI: `${getBaseUrl()}/api/auth/oauth2/callback/microsoft-dataverse`,
+          getUserInfo: async (tokens) => {
+            // Dataverse access tokens target dynamics.microsoft.com, not graph.microsoft.com,
+            // so we cannot call the Graph API /me endpoint. Instead, we decode the ID token JWT
+            // which is always returned when the openid scope is requested.
+            const idToken = (tokens as Record<string, unknown>).idToken as string | undefined
+            if (!idToken) {
+              logger.error(
+                'Microsoft Dataverse OAuth: no ID token received. Ensure openid scope is requested.'
+              )
+              throw new Error('Microsoft Dataverse OAuth requires an ID token (openid scope)')
+            }
+
+            const parts = idToken.split('.')
+            if (parts.length !== 3) {
+              throw new Error('Microsoft Dataverse OAuth: malformed ID token')
+            }
+
+            const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'))
+            const now = new Date()
+            return {
+              id: `${payload.oid || payload.sub}-${crypto.randomUUID()}`,
+              name: payload.name || 'Microsoft User',
+              email: payload.preferred_username || payload.email || payload.upn,
+              emailVerified: true,
+              createdAt: now,
+              updatedAt: now,
             }
           },
         },
@@ -1517,7 +1803,7 @@ export const auth = betterAuth({
               })
 
               return {
-                id: `${data.user_id || data.hub_id.toString()}-${crypto.randomUUID()}`,
+                id: `${(data.user_id || data.hub_id).toString()}-${crypto.randomUUID()}`,
                 name: data.user || 'HubSpot User',
                 email: data.user || `hubspot-${data.hub_id}@hubspot.com`,
                 emailVerified: true,
@@ -1571,7 +1857,7 @@ export const auth = betterAuth({
               const data = await response.json()
 
               return {
-                id: `${data.user_id || data.sub}-${crypto.randomUUID()}`,
+                id: `${(data.user_id || data.sub).toString()}-${crypto.randomUUID()}`,
                 name: data.name || 'Salesforce User',
                 email: data.email || `salesforce-${data.user_id}@salesforce.com`,
                 emailVerified: data.email_verified || true,
@@ -1595,7 +1881,23 @@ export const auth = betterAuth({
           tokenUrl: 'https://api.x.com/2/oauth2/token',
           userInfoUrl: 'https://api.x.com/2/users/me',
           accessType: 'offline',
-          scopes: ['tweet.read', 'tweet.write', 'users.read', 'offline.access'],
+          scopes: [
+            'tweet.read',
+            'tweet.write',
+            'tweet.moderate.write',
+            'users.read',
+            'follows.read',
+            'follows.write',
+            'bookmark.read',
+            'bookmark.write',
+            'like.read',
+            'like.write',
+            'block.read',
+            'block.write',
+            'mute.read',
+            'mute.write',
+            'offline.access',
+          ],
           pkce: true,
           responseType: 'code',
           prompt: 'consent',
@@ -1630,7 +1932,7 @@ export const auth = betterAuth({
               const now = new Date()
 
               return {
-                id: `${profile.data.id}-${crypto.randomUUID()}`,
+                id: `${profile.data.id.toString()}-${crypto.randomUUID()}`,
                 name: profile.data.name || 'X User',
                 email: `${profile.data.username}@x.com`,
                 image: profile.data.profile_image_url,
@@ -1676,6 +1978,21 @@ export const auth = betterAuth({
             'search:confluence',
             'read:me',
             'offline_access',
+            'read:blogpost:confluence',
+            'write:blogpost:confluence',
+            'read:content.property:confluence',
+            'write:content.property:confluence',
+            'read:hierarchical-content:confluence',
+            'read:content.metadata:confluence',
+            'read:user:confluence',
+            'read:task:confluence',
+            'write:task:confluence',
+            'delete:blogpost:confluence',
+            'write:space:confluence',
+            'delete:space:confluence',
+            'read:space.property:confluence',
+            'write:space.property:confluence',
+            'read:space.permission:confluence',
           ],
           responseType: 'code',
           pkce: true,
@@ -1704,7 +2021,7 @@ export const auth = betterAuth({
               const now = new Date()
 
               return {
-                id: `${profile.account_id}-${crypto.randomUUID()}`,
+                id: `${profile.account_id.toString()}-${crypto.randomUUID()}`,
                 name: profile.name || profile.display_name || 'Confluence User',
                 email: profile.email || `${profile.account_id}@atlassian.com`,
                 image: profile.picture || undefined,
@@ -1815,7 +2132,7 @@ export const auth = betterAuth({
               const now = new Date()
 
               return {
-                id: `${profile.account_id}-${crypto.randomUUID()}`,
+                id: `${profile.account_id.toString()}-${crypto.randomUUID()}`,
                 name: profile.name || profile.display_name || 'Jira User',
                 email: profile.email || `${profile.account_id}@atlassian.com`,
                 image: profile.picture || undefined,
@@ -1865,7 +2182,7 @@ export const auth = betterAuth({
               const now = new Date()
 
               return {
-                id: `${data.id}-${crypto.randomUUID()}`,
+                id: `${data.id.toString()}-${crypto.randomUUID()}`,
                 name: data.email ? data.email.split('@')[0] : 'Airtable User',
                 email: data.email || `${data.id}@airtable.user`,
                 emailVerified: !!data.email,
@@ -1914,7 +2231,7 @@ export const auth = betterAuth({
               const now = new Date()
 
               return {
-                id: `${profile.bot?.owner?.user?.id || profile.id}-${crypto.randomUUID()}`,
+                id: `${(profile.bot?.owner?.user?.id || profile.id).toString()}-${crypto.randomUUID()}`,
                 name: profile.name || profile.bot?.owner?.user?.name || 'Notion User',
                 email: profile.person?.email || `${profile.id}@notion.user`,
                 emailVerified: !!profile.person?.email,
@@ -1981,7 +2298,7 @@ export const auth = betterAuth({
               const now = new Date()
 
               return {
-                id: `${data.id}-${crypto.randomUUID()}`,
+                id: `${data.id.toString()}-${crypto.randomUUID()}`,
                 name: data.name || 'Reddit User',
                 email: `${data.name}@reddit.user`,
                 image: data.icon_img || undefined,
@@ -2053,7 +2370,7 @@ export const auth = betterAuth({
               const viewer = data.viewer
 
               return {
-                id: `${viewer.id}-${crypto.randomUUID()}`,
+                id: `${viewer.id.toString()}-${crypto.randomUUID()}`,
                 email: viewer.email,
                 name: viewer.name,
                 emailVerified: true,
@@ -2063,6 +2380,69 @@ export const auth = betterAuth({
               }
             } catch (error) {
               logger.error('Error in getUserInfo:', error)
+              throw error
+            }
+          },
+        },
+
+        {
+          providerId: 'attio',
+          clientId: env.ATTIO_CLIENT_ID as string,
+          clientSecret: env.ATTIO_CLIENT_SECRET as string,
+          authorizationUrl: 'https://app.attio.com/authorize',
+          tokenUrl: 'https://app.attio.com/oauth/token',
+          scopes: [
+            'record_permission:read-write',
+            'object_configuration:read-write',
+            'list_configuration:read-write',
+            'list_entry:read-write',
+            'note:read-write',
+            'task:read-write',
+            'comment:read-write',
+            'user_management:read',
+            'webhook:read-write',
+          ],
+          responseType: 'code',
+          redirectURI: `${getBaseUrl()}/api/auth/oauth2/callback/attio`,
+          getUserInfo: async (tokens) => {
+            try {
+              const response = await fetch('https://api.attio.com/v2/workspace_members', {
+                headers: {
+                  Authorization: `Bearer ${tokens.accessToken}`,
+                },
+              })
+
+              if (!response.ok) {
+                const errorText = await response.text()
+                logger.error('Attio API error:', {
+                  status: response.status,
+                  statusText: response.statusText,
+                  body: errorText,
+                })
+                throw new Error(`Attio API error: ${response.status} ${response.statusText}`)
+              }
+
+              const { data } = await response.json()
+
+              if (!data || data.length === 0) {
+                throw new Error('No workspace members found in Attio response')
+              }
+
+              const member = data[0]
+
+              return {
+                id: `${member.id.workspace_member_id}-${crypto.randomUUID()}`,
+                email: member.email_address,
+                name:
+                  `${member.first_name ?? ''} ${member.last_name ?? ''}`.trim() ||
+                  member.email_address,
+                emailVerified: true,
+                createdAt: new Date(),
+                updatedAt: new Date(),
+                image: member.avatar_url || undefined,
+              }
+            } catch (error) {
+              logger.error('Error in Attio getUserInfo:', error)
               throw error
             }
           },
@@ -2116,7 +2496,7 @@ export const auth = betterAuth({
               const data = await response.json()
 
               return {
-                id: `${data.account_id}-${crypto.randomUUID()}`,
+                id: `${data.account_id.toString()}-${crypto.randomUUID()}`,
                 email: data.email,
                 name: data.name?.display_name || data.email,
                 emailVerified: data.email_verified || false,
@@ -2167,7 +2547,7 @@ export const auth = betterAuth({
               const now = new Date()
 
               return {
-                id: `${profile.gid}-${crypto.randomUUID()}`,
+                id: `${profile.gid.toString()}-${crypto.randomUUID()}`,
                 name: profile.name || 'Asana User',
                 email: profile.email || `${profile.gid}@asana.user`,
                 image: profile.photo?.image_128x128 || undefined,
@@ -2402,7 +2782,7 @@ export const auth = betterAuth({
               const profile = await response.json()
 
               return {
-                id: `${profile.id}-${crypto.randomUUID()}`,
+                id: `${profile.id.toString()}-${crypto.randomUUID()}`,
                 name:
                   `${profile.first_name || ''} ${profile.last_name || ''}`.trim() || 'Zoom User',
                 email: profile.email || `${profile.id}@zoom.user`,
@@ -2469,7 +2849,7 @@ export const auth = betterAuth({
               const profile = await response.json()
 
               return {
-                id: `${profile.id}-${crypto.randomUUID()}`,
+                id: `${profile.id.toString()}-${crypto.randomUUID()}`,
                 name: profile.display_name || 'Spotify User',
                 email: profile.email || `${profile.id}@spotify.user`,
                 emailVerified: true,
@@ -2531,6 +2911,55 @@ export const auth = betterAuth({
             }
           },
         },
+
+        // Cal.com provider
+        {
+          providerId: 'calcom',
+          clientId: env.CALCOM_CLIENT_ID as string,
+          authorizationUrl: 'https://app.cal.com/auth/oauth2/authorize',
+          tokenUrl: 'https://app.cal.com/api/auth/oauth/token',
+          scopes: [],
+          responseType: 'code',
+          pkce: true,
+          accessType: 'offline',
+          prompt: 'consent',
+          redirectURI: `${getBaseUrl()}/api/auth/oauth2/callback/calcom`,
+          getUserInfo: async (tokens) => {
+            try {
+              logger.info('Fetching Cal.com user profile')
+
+              const response = await fetch('https://api.cal.com/v2/me', {
+                headers: {
+                  Authorization: `Bearer ${tokens.accessToken}`,
+                  'cal-api-version': '2024-08-13',
+                },
+              })
+
+              if (!response.ok) {
+                logger.error('Failed to fetch Cal.com user info', {
+                  status: response.status,
+                  statusText: response.statusText,
+                })
+                throw new Error('Failed to fetch user info')
+              }
+
+              const data = await response.json()
+              const profile = data.data || data
+
+              return {
+                id: `${profile.id?.toString()}-${crypto.randomUUID()}`,
+                name: profile.name || 'Cal.com User',
+                email: profile.email || `${profile.id}@cal.com`,
+                emailVerified: true,
+                createdAt: new Date(),
+                updatedAt: new Date(),
+              }
+            } catch (error) {
+              logger.error('Error in Cal.com getUserInfo:', { error })
+              return null
+            }
+          },
+        },
       ],
     }),
     // Include SSO plugin when enabled
@@ -2581,29 +3010,42 @@ export const auth = betterAuth({
                 }
               },
               onSubscriptionComplete: async ({
+                stripeSubscription,
                 subscription,
               }: {
                 event: Stripe.Event
                 stripeSubscription: Stripe.Subscription
                 subscription: any
               }) => {
+                const { priceId, planFromStripe, isTeamPlan } =
+                  resolvePlanFromStripeSubscription(stripeSubscription)
+
                 logger.info('[onSubscriptionComplete] Subscription created', {
                   subscriptionId: subscription.id,
                   referenceId: subscription.referenceId,
-                  plan: subscription.plan,
+                  dbPlan: subscription.plan,
+                  planFromStripe,
+                  priceId,
                   status: subscription.status,
                 })
 
+                const subscriptionForOrgCreation = isTeamPlan
+                  ? { ...subscription, plan: 'team' }
+                  : subscription
+
                 let resolvedSubscription = subscription
                 try {
-                  resolvedSubscription = await ensureOrganizationForTeamSubscription(subscription)
+                  resolvedSubscription = await ensureOrganizationForTeamSubscription(
+                    subscriptionForOrgCreation
+                  )
                 } catch (orgError) {
                   logger.error(
                     '[onSubscriptionComplete] Failed to ensure organization for team subscription',
                     {
                       subscriptionId: subscription.id,
                       referenceId: subscription.referenceId,
-                      plan: subscription.plan,
+                      dbPlan: subscription.plan,
+                      planFromStripe,
                       error: orgError instanceof Error ? orgError.message : String(orgError),
                       stack: orgError instanceof Error ? orgError.stack : undefined,
                     }
@@ -2624,22 +3066,67 @@ export const auth = betterAuth({
                 event: Stripe.Event
                 subscription: any
               }) => {
+                const stripeSubscription = event.data.object as Stripe.Subscription
+                const { priceId, planFromStripe, isTeamPlan } =
+                  resolvePlanFromStripeSubscription(stripeSubscription)
+
+                if (priceId && !planFromStripe) {
+                  logger.warn(
+                    '[onSubscriptionUpdate] Could not determine plan from Stripe price ID',
+                    {
+                      subscriptionId: subscription.id,
+                      priceId,
+                      dbPlan: subscription.plan,
+                    }
+                  )
+                }
+
+                const isUpgradeToTeam =
+                  isTeamPlan &&
+                  subscription.plan !== 'team' &&
+                  !subscription.referenceId.startsWith('org_')
+
+                const effectivePlanForTeamFeatures = planFromStripe ?? subscription.plan
+
                 logger.info('[onSubscriptionUpdate] Subscription updated', {
                   subscriptionId: subscription.id,
                   status: subscription.status,
-                  plan: subscription.plan,
+                  dbPlan: subscription.plan,
+                  planFromStripe,
+                  isUpgradeToTeam,
+                  referenceId: subscription.referenceId,
                 })
+
+                const subscriptionForOrgCreation = isUpgradeToTeam
+                  ? { ...subscription, plan: 'team' }
+                  : subscription
 
                 let resolvedSubscription = subscription
                 try {
-                  resolvedSubscription = await ensureOrganizationForTeamSubscription(subscription)
+                  resolvedSubscription = await ensureOrganizationForTeamSubscription(
+                    subscriptionForOrgCreation
+                  )
+
+                  if (isUpgradeToTeam) {
+                    logger.info(
+                      '[onSubscriptionUpdate] Detected Pro -> Team upgrade, ensured organization creation',
+                      {
+                        subscriptionId: subscription.id,
+                        originalPlan: subscription.plan,
+                        newPlan: planFromStripe,
+                        resolvedReferenceId: resolvedSubscription.referenceId,
+                      }
+                    )
+                  }
                 } catch (orgError) {
                   logger.error(
                     '[onSubscriptionUpdate] Failed to ensure organization for team subscription',
                     {
                       subscriptionId: subscription.id,
                       referenceId: subscription.referenceId,
-                      plan: subscription.plan,
+                      dbPlan: subscription.plan,
+                      planFromStripe,
+                      isUpgradeToTeam,
                       error: orgError instanceof Error ? orgError.message : String(orgError),
                       stack: orgError instanceof Error ? orgError.stack : undefined,
                     }
@@ -2657,9 +3144,8 @@ export const auth = betterAuth({
                   })
                 }
 
-                if (resolvedSubscription.plan === 'team') {
+                if (effectivePlanForTeamFeatures === 'team') {
                   try {
-                    const stripeSubscription = event.data.object as Stripe.Subscription
                     const quantity = stripeSubscription.items?.data?.[0]?.quantity || 1
 
                     const result = await syncSeatsFromStripeQuantity(

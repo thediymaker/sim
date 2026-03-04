@@ -1,7 +1,7 @@
 # ========================================
 # Base Stage: Debian-based Bun with Node.js 22
 # ========================================
-FROM docker.io/oven/bun:1.3.3-slim AS base
+FROM docker.io/oven/bun:1.3.9-slim AS base
 
 # Install Node.js 22 and common dependencies once in base stage
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -124,7 +124,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 # Create .next/cache directory with correct ownership
 RUN mkdir -p apps/sim/.next/cache && \
-    chown -R nextjs:nodejs /app
+    chown -R nextjs:nodejs apps/sim/.next/cache
 
 # Switch to non-root user
 USER nextjs

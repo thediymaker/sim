@@ -107,13 +107,14 @@ export const Copilot = forwardRef<CopilotRef, CopilotProps>(({ panelWidth }, ref
     currentChat,
     selectChat,
     deleteChat,
-    areChatsFresh,
     workflowId: copilotWorkflowId,
     setPlanTodos,
     closePlanTodos,
     clearPlanArtifact,
     savePlanArtifact,
+    loadAvailableModels,
     loadAutoAllowedTools,
+    resumeActiveStream,
   } = useCopilotStore()
 
   // Initialize copilot
@@ -123,15 +124,15 @@ export const Copilot = forwardRef<CopilotRef, CopilotProps>(({ panelWidth }, ref
     chatsLoadedForWorkflow,
     setCopilotWorkflowId,
     loadChats,
+    loadAvailableModels,
     loadAutoAllowedTools,
     currentChat,
     isSendingMessage,
+    resumeActiveStream,
   })
 
-  // Handle scroll management (80px stickiness for copilot)
-  const { scrollAreaRef, scrollToBottom } = useScrollManagement(messages, isSendingMessage, {
-    stickinessThreshold: 40,
-  })
+  // Handle scroll management
+  const { scrollAreaRef, scrollToBottom } = useScrollManagement(messages, isSendingMessage)
 
   // Handle chat history grouping
   const { groupedChats, handleHistoryDropdownOpen: handleHistoryDropdownOpenHook } = useChatHistory(
@@ -140,7 +141,6 @@ export const Copilot = forwardRef<CopilotRef, CopilotProps>(({ panelWidth }, ref
       activeWorkflowId,
       copilotWorkflowId,
       loadChats,
-      areChatsFresh,
       isSendingMessage,
     }
   )
@@ -421,8 +421,8 @@ export const Copilot = forwardRef<CopilotRef, CopilotProps>(({ panelWidth }, ref
           </div>
         </div>
 
-        {/* Show loading state until fully initialized */}
-        {!isInitialized ? (
+        {/* Show loading state until fully initialized, but skip if actively streaming (resume case) */}
+        {!isInitialized && !isSendingMessage ? (
           <div className='flex h-full w-full items-center justify-center'>
             <div className='flex flex-col items-center gap-3'>
               <p className='text-muted-foreground text-sm'>Loading copilot</p>

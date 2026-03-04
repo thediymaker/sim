@@ -8,6 +8,17 @@ const logger = createLogger('EmbeddingUtils')
 
 const MAX_TOKENS_PER_REQUEST = 8000
 const MAX_CONCURRENT_BATCHES = env.KB_CONFIG_CONCURRENCY_LIMIT || 50
+const EMBEDDING_DIMENSIONS = 1536
+
+/**
+ * Check if the model supports custom dimensions.
+ * text-embedding-3-* models support the dimensions parameter.
+ * Checks for 'embedding-3' to handle Azure deployments with custom naming conventions.
+ */
+function supportsCustomDimensions(modelName: string): boolean {
+  const name = modelName.toLowerCase()
+  return name.includes('embedding-3') && !name.includes('ada')
+}
 
 export class EmbeddingAPIError extends Error {
   public status: number
@@ -74,22 +85,21 @@ async function getEmbeddingConfig(
     }
   }
 
-  if (!openaiApiKey && !baseUrl) { // If baseUrl is set, we might not need key if it's local
-    // But usually auth is required or ignored. Let's allow if baseUrl is set
+  if (!openaiApiKey && !baseUrl) {
     throw new Error(
       'Either OPENAI_API_KEY or Azure OpenAI configuration (AZURE_OPENAI_API_KEY + AZURE_OPENAI_ENDPOINT) or OPENAI_BASE_URL must be configured'
     )
   }
 
   const apiUrl = baseUrl
-    ? `${baseUrl.replace(/\/$/, '')}/embeddings` // Assume base is .../v1
+    ? `${baseUrl.replace(/\/$/, '')}/embeddings`
     : 'https://api.openai.com/v1/embeddings'
 
   return {
     useAzure: false,
     apiUrl,
     headers: {
-      Authorization: `Bearer ${openaiApiKey || 'sk-dummy'}`, // Default dummy if local
+      Authorization: `Bearer ${openaiApiKey || 'sk-dummy'}`,
       'Content-Type': 'application/json',
     },
     modelName: kbModelName,
@@ -99,16 +109,20 @@ async function getEmbeddingConfig(
 async function callEmbeddingAPI(inputs: string[], config: EmbeddingConfig): Promise<number[][]> {
   return retryWithExponentialBackoff(
     async () => {
+      const useDimensions = supportsCustomDimensions(config.modelName)
+
       const requestBody = config.useAzure
         ? {
-          input: inputs,
-          encoding_format: 'float',
-        }
+            input: inputs,
+            encoding_format: 'float',
+            ...(useDimensions && { dimensions: EMBEDDING_DIMENSIONS }),
+          }
         : {
-          input: inputs,
-          model: config.modelName,
-          encoding_format: 'float',
-        }
+            input: inputs,
+            model: config.modelName,
+            encoding_format: 'float',
+            ...(useDimensions && { dimensions: EMBEDDING_DIMENSIONS }),
+          }
 
       const response = await fetch(config.apiUrl, {
         method: 'POST',

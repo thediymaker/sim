@@ -1,32 +1,22 @@
 import { createLogger } from '@sim/logger'
 import { AgentIcon } from '@/components/icons'
-import { isHosted } from '@/lib/core/config/feature-flags'
 import type { BlockConfig } from '@/blocks/types'
 import { AuthMode } from '@/blocks/types'
+import { getApiKeyCondition, getModelOptions } from '@/blocks/utils'
 import {
   getBaseModelProviders,
-  getHostedModels,
   getMaxTemperature,
-  getProviderIcon,
   getReasoningEffortValuesForModel,
   getThinkingLevelsForModel,
   getVerbosityValuesForModel,
+  MODELS_WITH_DEEP_RESEARCH,
   MODELS_WITH_REASONING_EFFORT,
   MODELS_WITH_THINKING,
   MODELS_WITH_VERBOSITY,
+  MODELS_WITHOUT_MEMORY,
   providers,
   supportsTemperature,
 } from '@/providers/utils'
-
-const getCurrentOllamaModels = () => {
-  return useProvidersStore.getState().providers.ollama.models
-}
-
-const getCurrentVLLMModels = () => {
-  return useProvidersStore.getState().providers.vllm.models
-}
-
-import { useProvidersStore } from '@/stores/providers'
 import type { ToolResponse } from '@/tools/types'
 
 const logger = createLogger('AgentBlock')
@@ -128,31 +118,31 @@ Return ONLY the JSON array.`,
       type: 'combobox',
       placeholder: 'Type or select a model...',
       required: true,
-      defaultValue: '',
-      options: () => {
-        const providersState = useProvidersStore.getState()
-        const baseModels = providersState.providers.base.models
-        const ollamaModels = providersState.providers.ollama.models
-        const vllmModels = providersState.providers.vllm.models
-        const openrouterModels = providersState.providers.openrouter.models
-        const litellmModels = providersState.providers.litellm.models
-        const allModels = Array.from(
-          new Set([...baseModels, ...ollamaModels, ...vllmModels, ...openrouterModels, ...litellmModels])
-        )
-
-        return allModels.map((model) => {
-          const icon = getProviderIcon(model)
-          return { label: model, id: model, ...(icon && { icon }) }
-        })
-      },
+      defaultValue: 'claude-sonnet-4-5',
+      options: getModelOptions,
     },
     {
       id: 'vertexCredential',
       title: 'Google Cloud Account',
       type: 'oauth-input',
       serviceId: 'vertex-ai',
+      canonicalParamId: 'oauthCredential',
+      mode: 'basic',
       requiredScopes: ['https://www.googleapis.com/auth/cloud-platform'],
       placeholder: 'Select Google Cloud account',
+      required: true,
+      condition: {
+        field: 'model',
+        value: providers.vertex.models,
+      },
+    },
+    {
+      id: 'manualCredential',
+      title: 'Google Cloud Account',
+      type: 'short-input',
+      canonicalParamId: 'oauthCredential',
+      mode: 'advanced',
+      placeholder: 'Enter credential ID',
       required: true,
       condition: {
         field: 'model',
@@ -165,6 +155,7 @@ Return ONLY the JSON array.`,
       type: 'dropdown',
       placeholder: 'Select reasoning effort...',
       options: [
+        { label: 'auto', id: 'auto' },
         { label: 'low', id: 'low' },
         { label: 'medium', id: 'medium' },
         { label: 'high', id: 'high' },
@@ -174,9 +165,12 @@ Return ONLY the JSON array.`,
         const { useSubBlockStore } = await import('@/stores/workflows/subblock/store')
         const { useWorkflowRegistry } = await import('@/stores/workflows/registry/store')
 
+        const autoOption = { label: 'auto', id: 'auto' }
+
         const activeWorkflowId = useWorkflowRegistry.getState().activeWorkflowId
         if (!activeWorkflowId) {
           return [
+            autoOption,
             { label: 'low', id: 'low' },
             { label: 'medium', id: 'medium' },
             { label: 'high', id: 'high' },
@@ -189,6 +183,7 @@ Return ONLY the JSON array.`,
 
         if (!modelValue) {
           return [
+            autoOption,
             { label: 'low', id: 'low' },
             { label: 'medium', id: 'medium' },
             { label: 'high', id: 'high' },
@@ -198,15 +193,16 @@ Return ONLY the JSON array.`,
         const validOptions = getReasoningEffortValuesForModel(modelValue)
         if (!validOptions) {
           return [
+            autoOption,
             { label: 'low', id: 'low' },
             { label: 'medium', id: 'medium' },
             { label: 'high', id: 'high' },
           ]
         }
 
-        return validOptions.map((opt) => ({ label: opt, id: opt }))
+        return [autoOption, ...validOptions.map((opt) => ({ label: opt, id: opt }))]
       },
-      value: () => 'medium',
+      mode: 'advanced',
       condition: {
         field: 'model',
         value: MODELS_WITH_REASONING_EFFORT,
@@ -218,6 +214,7 @@ Return ONLY the JSON array.`,
       type: 'dropdown',
       placeholder: 'Select verbosity...',
       options: [
+        { label: 'auto', id: 'auto' },
         { label: 'low', id: 'low' },
         { label: 'medium', id: 'medium' },
         { label: 'high', id: 'high' },
@@ -227,9 +224,12 @@ Return ONLY the JSON array.`,
         const { useSubBlockStore } = await import('@/stores/workflows/subblock/store')
         const { useWorkflowRegistry } = await import('@/stores/workflows/registry/store')
 
+        const autoOption = { label: 'auto', id: 'auto' }
+
         const activeWorkflowId = useWorkflowRegistry.getState().activeWorkflowId
         if (!activeWorkflowId) {
           return [
+            autoOption,
             { label: 'low', id: 'low' },
             { label: 'medium', id: 'medium' },
             { label: 'high', id: 'high' },
@@ -242,6 +242,7 @@ Return ONLY the JSON array.`,
 
         if (!modelValue) {
           return [
+            autoOption,
             { label: 'low', id: 'low' },
             { label: 'medium', id: 'medium' },
             { label: 'high', id: 'high' },
@@ -251,15 +252,16 @@ Return ONLY the JSON array.`,
         const validOptions = getVerbosityValuesForModel(modelValue)
         if (!validOptions) {
           return [
+            autoOption,
             { label: 'low', id: 'low' },
             { label: 'medium', id: 'medium' },
             { label: 'high', id: 'high' },
           ]
         }
 
-        return validOptions.map((opt) => ({ label: opt, id: opt }))
+        return [autoOption, ...validOptions.map((opt) => ({ label: opt, id: opt }))]
       },
-      value: () => 'medium',
+      mode: 'advanced',
       condition: {
         field: 'model',
         value: MODELS_WITH_VERBOSITY,
@@ -271,22 +273,23 @@ Return ONLY the JSON array.`,
       type: 'dropdown',
       placeholder: 'Select thinking level...',
       options: [
+        { label: 'none', id: 'none' },
         { label: 'minimal', id: 'minimal' },
         { label: 'low', id: 'low' },
         { label: 'medium', id: 'medium' },
         { label: 'high', id: 'high' },
+        { label: 'max', id: 'max' },
       ],
       dependsOn: ['model'],
       fetchOptions: async (blockId: string) => {
         const { useSubBlockStore } = await import('@/stores/workflows/subblock/store')
         const { useWorkflowRegistry } = await import('@/stores/workflows/registry/store')
 
+        const noneOption = { label: 'none', id: 'none' }
+
         const activeWorkflowId = useWorkflowRegistry.getState().activeWorkflowId
         if (!activeWorkflowId) {
-          return [
-            { label: 'low', id: 'low' },
-            { label: 'high', id: 'high' },
-          ]
+          return [noneOption, { label: 'low', id: 'low' }, { label: 'high', id: 'high' }]
         }
 
         const workflowValues = useSubBlockStore.getState().workflowValues[activeWorkflowId]
@@ -294,23 +297,17 @@ Return ONLY the JSON array.`,
         const modelValue = blockValues?.model as string
 
         if (!modelValue) {
-          return [
-            { label: 'low', id: 'low' },
-            { label: 'high', id: 'high' },
-          ]
+          return [noneOption, { label: 'low', id: 'low' }, { label: 'high', id: 'high' }]
         }
 
         const validOptions = getThinkingLevelsForModel(modelValue)
         if (!validOptions) {
-          return [
-            { label: 'low', id: 'low' },
-            { label: 'high', id: 'high' },
-          ]
+          return [noneOption, { label: 'low', id: 'low' }, { label: 'high', id: 'high' }]
         }
 
-        return validOptions.map((opt) => ({ label: opt, id: opt }))
+        return [noneOption, ...validOptions.map((opt) => ({ label: opt, id: opt }))]
       },
-      value: () => 'high',
+      mode: 'advanced',
       condition: {
         field: 'model',
         value: MODELS_WITH_THINKING,
@@ -319,25 +316,25 @@ Return ONLY the JSON array.`,
 
     {
       id: 'azureEndpoint',
-      title: 'Azure OpenAI Endpoint',
+      title: 'Azure Endpoint',
       type: 'short-input',
       password: true,
-      placeholder: 'https://your-resource.openai.azure.com',
+      placeholder: 'https://your-resource.services.ai.azure.com',
       connectionDroppable: false,
       condition: {
         field: 'model',
-        value: providers['azure-openai'].models,
+        value: [...providers['azure-openai'].models, ...providers['azure-anthropic'].models],
       },
     },
     {
       id: 'azureApiVersion',
       title: 'Azure API Version',
       type: 'short-input',
-      placeholder: '2024-07-01-preview',
+      placeholder: 'Enter API version',
       connectionDroppable: false,
       condition: {
         field: 'model',
-        value: providers['azure-openai'].models,
+        value: [...providers['azure-openai'].models, ...providers['azure-anthropic'].models],
       },
     },
     {
@@ -402,12 +399,6 @@ Return ONLY the JSON array.`,
       },
     },
     {
-      id: 'tools',
-      title: 'Tools',
-      type: 'tool-input',
-      defaultValue: [],
-    },
-    {
       id: 'apiKey',
       title: 'API Key',
       type: 'short-input',
@@ -415,23 +406,29 @@ Return ONLY the JSON array.`,
       password: true,
       connectionDroppable: false,
       required: true,
-      // Hide API key for hosted models, Ollama models, vLLM models, Vertex models (uses OAuth), and Bedrock (uses AWS credentials)
-      condition: isHosted
-        ? {
-          field: 'model',
-          value: [...getHostedModels(), ...providers.vertex.models, ...providers.bedrock.models],
-          not: true, // Show for all models EXCEPT those listed
-        }
-        : () => ({
-          field: 'model',
-          value: [
-            ...getCurrentOllamaModels(),
-            ...getCurrentVLLMModels(),
-            ...providers.vertex.models,
-            ...providers.bedrock.models,
-          ],
-          not: true, // Show for all models EXCEPT Ollama, vLLM, Vertex, and Bedrock models
-        }),
+      condition: getApiKeyCondition(),
+    },
+    {
+      id: 'tools',
+      title: 'Tools',
+      type: 'tool-input',
+      defaultValue: [],
+      condition: {
+        field: 'model',
+        value: MODELS_WITH_DEEP_RESEARCH,
+        not: true,
+      },
+    },
+    {
+      id: 'skills',
+      title: 'Skills',
+      type: 'skill-input',
+      defaultValue: [],
+      condition: {
+        field: 'model',
+        value: MODELS_WITH_DEEP_RESEARCH,
+        not: true,
+      },
     },
     {
       id: 'memoryType',
@@ -445,6 +442,11 @@ Return ONLY the JSON array.`,
         { label: 'Sliding window (tokens)', id: 'sliding_window_tokens' },
       ],
       defaultValue: 'none',
+      condition: {
+        field: 'model',
+        value: MODELS_WITHOUT_MEMORY,
+        not: true,
+      },
     },
     {
       id: 'conversationId',
@@ -458,6 +460,7 @@ Return ONLY the JSON array.`,
       condition: {
         field: 'memoryType',
         value: ['conversation', 'sliding_window', 'sliding_window_tokens'],
+        and: { field: 'model', value: MODELS_WITHOUT_MEMORY, not: true },
       },
     },
     {
@@ -468,6 +471,7 @@ Return ONLY the JSON array.`,
       condition: {
         field: 'memoryType',
         value: ['sliding_window'],
+        and: { field: 'model', value: MODELS_WITHOUT_MEMORY, not: true },
       },
     },
     {
@@ -478,6 +482,7 @@ Return ONLY the JSON array.`,
       condition: {
         field: 'memoryType',
         value: ['sliding_window_tokens'],
+        and: { field: 'model', value: MODELS_WITHOUT_MEMORY, not: true },
       },
     },
     {
@@ -487,12 +492,17 @@ Return ONLY the JSON array.`,
       min: 0,
       max: 1,
       defaultValue: 0.3,
+      mode: 'advanced',
       condition: () => ({
         field: 'model',
         value: (() => {
+          const deepResearch = new Set(MODELS_WITH_DEEP_RESEARCH.map((m) => m.toLowerCase()))
           const allModels = Object.keys(getBaseModelProviders())
           return allModels.filter(
-            (model) => supportsTemperature(model) && getMaxTemperature(model) === 1
+            (model) =>
+              supportsTemperature(model) &&
+              getMaxTemperature(model) === 1 &&
+              !deepResearch.has(model.toLowerCase())
           )
         })(),
       }),
@@ -504,15 +514,32 @@ Return ONLY the JSON array.`,
       min: 0,
       max: 2,
       defaultValue: 0.3,
+      mode: 'advanced',
       condition: () => ({
         field: 'model',
         value: (() => {
+          const deepResearch = new Set(MODELS_WITH_DEEP_RESEARCH.map((m) => m.toLowerCase()))
           const allModels = Object.keys(getBaseModelProviders())
           return allModels.filter(
-            (model) => supportsTemperature(model) && getMaxTemperature(model) === 2
+            (model) =>
+              supportsTemperature(model) &&
+              getMaxTemperature(model) === 2 &&
+              !deepResearch.has(model.toLowerCase())
           )
         })(),
       }),
+    },
+    {
+      id: 'maxTokens',
+      title: 'Max Output Tokens',
+      type: 'short-input',
+      placeholder: 'Enter max tokens (e.g., 4096)...',
+      mode: 'advanced',
+      condition: {
+        field: 'model',
+        value: MODELS_WITH_DEEP_RESEARCH,
+        not: true,
+      },
     },
     {
       id: 'responseFormat',
@@ -520,6 +547,11 @@ Return ONLY the JSON array.`,
       type: 'code',
       placeholder: 'Enter JSON schema...',
       language: 'json',
+      condition: {
+        field: 'model',
+        value: MODELS_WITH_DEEP_RESEARCH,
+        not: true,
+      },
       wandConfig: {
         enabled: true,
         maintainHistory: true,
@@ -612,6 +644,16 @@ Example 3 (Array Input):
         generationType: 'json-schema',
       },
     },
+    {
+      id: 'previousInteractionId',
+      title: 'Previous Interaction ID',
+      type: 'short-input',
+      placeholder: 'e.g., {{agent_1.interactionId}}',
+      condition: {
+        field: 'model',
+        value: MODELS_WITH_DEEP_RESEARCH,
+      },
+    },
   ],
   tools: {
     access: [
@@ -624,7 +666,7 @@ Example 3 (Array Input):
     ],
     config: {
       tool: (params: Record<string, any>) => {
-        const model = params.model || ''
+        const model = params.model || 'claude-sonnet-4-5'
         if (!model) {
           throw new Error('No model selected')
         }
@@ -703,8 +745,9 @@ Example 3 (Array Input):
     },
     model: { type: 'string', description: 'AI model to use' },
     apiKey: { type: 'string', description: 'Provider API key' },
-    azureEndpoint: { type: 'string', description: 'Azure OpenAI endpoint URL' },
+    azureEndpoint: { type: 'string', description: 'Azure endpoint URL' },
     azureApiVersion: { type: 'string', description: 'Azure API version' },
+    oauthCredential: { type: 'string', description: 'OAuth credential for Vertex AI' },
     vertexProject: { type: 'string', description: 'Google Cloud project ID for Vertex AI' },
     vertexLocation: { type: 'string', description: 'Google Cloud location for Vertex AI' },
     bedrockAccessKeyId: { type: 'string', description: 'AWS Access Key ID for Bedrock' },
@@ -755,15 +798,33 @@ Example 3 (Array Input):
       },
     },
     temperature: { type: 'number', description: 'Response randomness level' },
+    maxTokens: { type: 'number', description: 'Maximum number of tokens in the response' },
     reasoningEffort: { type: 'string', description: 'Reasoning effort level for GPT-5 models' },
     verbosity: { type: 'string', description: 'Verbosity level for GPT-5 models' },
-    thinkingLevel: { type: 'string', description: 'Thinking level for Gemini 3 models' },
+    thinkingLevel: {
+      type: 'string',
+      description: 'Thinking level for models with extended thinking (Anthropic Claude, Gemini 3)',
+    },
     tools: { type: 'json', description: 'Available tools configuration' },
+    skills: { type: 'json', description: 'Selected skills configuration' },
   },
   outputs: {
     content: { type: 'string', description: 'Generated response content' },
     model: { type: 'string', description: 'Model used for generation' },
-    tokens: { type: 'any', description: 'Token usage statistics' },
-    toolCalls: { type: 'any', description: 'Tool calls made' },
+    tokens: { type: 'json', description: 'Token usage statistics' },
+    toolCalls: { type: 'json', description: 'Tool calls made' },
+    providerTiming: {
+      type: 'json',
+      description: 'Provider timing information',
+    },
+    cost: { type: 'json', description: 'Cost of the API call' },
+    interactionId: {
+      type: 'string',
+      description: 'Interaction ID for multi-turn deep research follow-ups',
+      condition: {
+        field: 'model',
+        value: MODELS_WITH_DEEP_RESEARCH,
+      },
+    },
   },
 }

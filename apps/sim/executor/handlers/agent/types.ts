@@ -1,7 +1,14 @@
+export interface SkillInput {
+  skillId: string
+  name?: string
+  description?: string
+}
+
 export interface AgentInputs {
   model?: string
   responseFormat?: string | object
   tools?: ToolInput[]
+  skills?: SkillInput[]
   // Legacy inputs (backward compatible)
   systemPrompt?: string
   userPrompt?: string | object
@@ -13,9 +20,11 @@ export interface AgentInputs {
   conversationId?: string // Required for all non-none memory types
   slidingWindowSize?: string // For message-based sliding window
   slidingWindowTokens?: string // For token-based sliding window
+  // Deep research multi-turn
+  previousInteractionId?: string // Interactions API previous interaction reference
   // LLM parameters
-  temperature?: number
-  maxTokens?: number
+  temperature?: string
+  maxTokens?: string
   apiKey?: string
   azureEndpoint?: string
   azureApiVersion?: string
@@ -27,13 +36,25 @@ export interface AgentInputs {
   bedrockRegion?: string
   reasoningEffort?: string
   verbosity?: string
+  thinkingLevel?: string
 }
 
+/**
+ * Represents a tool input for the agent block.
+ *
+ * @remarks
+ * Valid types include:
+ * - Standard block types (e.g., 'api', 'search', 'function')
+ * - 'custom-tool': User-defined tools with custom code
+ * - 'mcp': Individual MCP tool from a connected server
+ */
 export interface ToolInput {
+  /** Tool type identifier */
   type?: string
   schema?: any
   title?: string
   code?: string
+  /** Tool parameters */
   params?: Record<string, any>
   timeout?: number
   usageControl?: 'auto' | 'force' | 'none'

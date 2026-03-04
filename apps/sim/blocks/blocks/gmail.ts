@@ -1,7 +1,7 @@
 import { GmailIcon } from '@/components/icons'
 import type { BlockConfig } from '@/blocks/types'
 import { AuthMode } from '@/blocks/types'
-import { createVersionedToolSelector } from '@/blocks/utils'
+import { createVersionedToolSelector, normalizeFileInput } from '@/blocks/utils'
 import type { GmailToolResponse } from '@/tools/gmail/types'
 import { getTrigger } from '@/triggers'
 
@@ -76,6 +76,8 @@ export const GmailBlock: BlockConfig<GmailToolResponse> = {
       id: 'credential',
       title: 'Gmail Account',
       type: 'oauth-input',
+      canonicalParamId: 'oauthCredential',
+      mode: 'basic',
       serviceId: 'gmail',
       requiredScopes: [
         'https://www.googleapis.com/auth/gmail.send',
@@ -83,6 +85,15 @@ export const GmailBlock: BlockConfig<GmailToolResponse> = {
         'https://www.googleapis.com/auth/gmail.labels',
       ],
       placeholder: 'Select Gmail account',
+      required: true,
+    },
+    {
+      id: 'manualCredential',
+      title: 'Gmail Account',
+      type: 'short-input',
+      canonicalParamId: 'oauthCredential',
+      mode: 'advanced',
+      placeholder: 'Enter credential ID',
       required: true,
     },
     // Send Email Fields
@@ -210,6 +221,7 @@ Return ONLY the email body - no explanations, no extra text.`,
       type: 'folder-selector',
       canonicalParamId: 'folder',
       serviceId: 'gmail',
+      selectorKey: 'gmail.labels',
       requiredScopes: ['https://www.googleapis.com/auth/gmail.labels'],
       placeholder: 'Select Gmail label/folder',
       dependsOn: ['credential'],
@@ -242,15 +254,9 @@ Return ONLY the email body - no explanations, no extra text.`,
       id: 'messageId',
       title: 'Message ID',
       type: 'short-input',
-      placeholder: 'Enter message ID to read (optional)',
-      condition: {
-        field: 'operation',
-        value: 'read_gmail',
-        and: {
-          field: 'folder',
-          value: '',
-        },
-      },
+      placeholder: 'Read specific email by ID (overrides label/folder)',
+      condition: { field: 'operation', value: 'read_gmail' },
+      mode: 'advanced',
     },
     // Search Fields
     {
@@ -296,6 +302,7 @@ Return ONLY the search query - no explanations, no extra text.`,
       type: 'folder-selector',
       canonicalParamId: 'addLabelIds',
       serviceId: 'gmail',
+      selectorKey: 'gmail.labels',
       requiredScopes: ['https://www.googleapis.com/auth/gmail.labels'],
       placeholder: 'Select destination label',
       dependsOn: ['credential'],
@@ -321,6 +328,7 @@ Return ONLY the search query - no explanations, no extra text.`,
       type: 'folder-selector',
       canonicalParamId: 'removeLabelIds',
       serviceId: 'gmail',
+      selectorKey: 'gmail.labels',
       requiredScopes: ['https://www.googleapis.com/auth/gmail.labels'],
       placeholder: 'Select label to remove',
       dependsOn: ['credential'],
@@ -368,11 +376,12 @@ Return ONLY the search query - no explanations, no extra text.`,
     },
     // Add/Remove Label - Label selector (basic mode)
     {
-      id: 'labelManagement',
+      id: 'labelSelector',
       title: 'Label',
       type: 'folder-selector',
-      canonicalParamId: 'labelIds',
+      canonicalParamId: 'manageLabelId',
       serviceId: 'gmail',
+      selectorKey: 'gmail.labels',
       requiredScopes: ['https://www.googleapis.com/auth/gmail.labels'],
       placeholder: 'Select label',
       dependsOn: ['credential'],
@@ -382,10 +391,10 @@ Return ONLY the search query - no explanations, no extra text.`,
     },
     // Add/Remove Label - Manual label input (advanced mode)
     {
-      id: 'manualLabelManagement',
+      id: 'manualLabelId',
       title: 'Label',
       type: 'short-input',
-      canonicalParamId: 'labelIds',
+      canonicalParamId: 'manageLabelId',
       placeholder: 'Enter label ID (e.g., INBOX, Label_123)',
       mode: 'advanced',
       condition: { field: 'operation', value: ['add_label_gmail', 'remove_label_gmail'] },
@@ -412,38 +421,35 @@ Return ONLY the search query - no explanations, no extra text.`,
       tool: selectGmailToolId,
       params: (params) => {
         const {
-          credential,
+          oauthCredential,
           folder,
-          manualFolder,
-          destinationLabel,
-          manualDestinationLabel,
-          sourceLabel,
-          manualSourceLabel,
+          addLabelIds,
+          removeLabelIds,
           moveMessageId,
           actionMessageId,
           labelActionMessageId,
-          labelManagement,
-          manualLabelManagement,
+          manageLabelId,
+          attachments,
           ...rest
         } = params
 
-        // Handle both selector and manual folder input
-        const effectiveFolder = (folder || manualFolder || '').trim()
+        // Use canonical 'folder' param directly
+        const effectiveFolder = folder ? String(folder).trim() : ''
 
         if (rest.operation === 'read_gmail') {
           rest.folder = effectiveFolder || 'INBOX'
         }
 
-        // Handle move operation
+        // Handle move operation - use canonical params addLabelIds and removeLabelIds
         if (rest.operation === 'move_gmail') {
           if (moveMessageId) {
             rest.messageId = moveMessageId
           }
-          if (!rest.addLabelIds) {
-            rest.addLabelIds = (destinationLabel || manualDestinationLabel || '').trim()
+          if (addLabelIds) {
+            rest.addLabelIds = String(addLabelIds).trim()
           }
-          if (!rest.removeLabelIds) {
-            rest.removeLabelIds = (sourceLabel || manualSourceLabel || '').trim()
+          if (removeLabelIds) {
+            rest.removeLabelIds = String(removeLabelIds).trim()
           }
         }
 
@@ -466,21 +472,25 @@ Return ONLY the search query - no explanations, no extra text.`,
           if (labelActionMessageId) {
             rest.messageId = labelActionMessageId
           }
-          if (!rest.labelIds) {
-            rest.labelIds = (labelManagement || manualLabelManagement || '').trim()
+          if (manageLabelId) {
+            rest.labelIds = String(manageLabelId).trim()
           }
         }
 
+        // Normalize attachments for send/draft operations - use canonical 'attachments' param
+        const normalizedAttachments = normalizeFileInput(attachments)
+
         return {
           ...rest,
-          credential,
+          oauthCredential,
+          ...(normalizedAttachments && { attachments: normalizedAttachments }),
         }
       },
     },
   },
   inputs: {
     operation: { type: 'string', description: 'Operation to perform' },
-    credential: { type: 'string', description: 'Gmail access token' },
+    oauthCredential: { type: 'string', description: 'Gmail access token' },
     // Send operation inputs
     to: { type: 'string', description: 'Recipient email address' },
     subject: { type: 'string', description: 'Email subject' },
@@ -493,10 +503,9 @@ Return ONLY the search query - no explanations, no extra text.`,
     },
     cc: { type: 'string', description: 'CC recipients (comma-separated)' },
     bcc: { type: 'string', description: 'BCC recipients (comma-separated)' },
-    attachments: { type: 'array', description: 'Files to attach (UserFile array)' },
+    attachments: { type: 'array', description: 'Files to attach (canonical param)' },
     // Read operation inputs
-    folder: { type: 'string', description: 'Gmail folder' },
-    manualFolder: { type: 'string', description: 'Manual folder name' },
+    folder: { type: 'string', description: 'Gmail folder (canonical param)' },
     readMessageId: { type: 'string', description: 'Message identifier for reading specific email' },
     unreadOnly: { type: 'boolean', description: 'Unread messages only' },
     includeAttachments: { type: 'boolean', description: 'Include email attachments' },
@@ -505,24 +514,22 @@ Return ONLY the search query - no explanations, no extra text.`,
     maxResults: { type: 'number', description: 'Maximum results' },
     // Move operation inputs
     moveMessageId: { type: 'string', description: 'Message ID to move' },
-    destinationLabel: { type: 'string', description: 'Destination label ID' },
-    manualDestinationLabel: { type: 'string', description: 'Manual destination label ID' },
-    sourceLabel: { type: 'string', description: 'Source label ID to remove' },
-    manualSourceLabel: { type: 'string', description: 'Manual source label ID' },
-    addLabelIds: { type: 'string', description: 'Label IDs to add' },
-    removeLabelIds: { type: 'string', description: 'Label IDs to remove' },
+    addLabelIds: { type: 'string', description: 'Label IDs to add (canonical param)' },
+    removeLabelIds: { type: 'string', description: 'Label IDs to remove (canonical param)' },
     // Action operation inputs
     actionMessageId: { type: 'string', description: 'Message ID for actions' },
     labelActionMessageId: { type: 'string', description: 'Message ID for label actions' },
-    labelManagement: { type: 'string', description: 'Label ID for management' },
-    manualLabelManagement: { type: 'string', description: 'Manual label ID' },
-    labelIds: { type: 'string', description: 'Label IDs for add/remove operations' },
+    manageLabelId: {
+      type: 'string',
+      description: 'Label ID for add/remove operations (canonical param)',
+    },
+    labelIds: { type: 'string', description: 'Label IDs to monitor (trigger)' },
   },
   outputs: {
     // Tool outputs
     content: { type: 'string', description: 'Response content' },
     metadata: { type: 'json', description: 'Email metadata' },
-    attachments: { type: 'json', description: 'Email attachments array' },
+    attachments: { type: 'file[]', description: 'Email attachments array' },
     // Trigger outputs
     email_id: { type: 'string', description: 'Gmail message ID' },
     thread_id: { type: 'string', description: 'Gmail thread ID' },
@@ -585,7 +592,19 @@ export const GmailV2Block: BlockConfig<GmailToolResponse> = {
     date: { type: 'string', description: 'Date' },
     body: { type: 'string', description: 'Email body text (best-effort)' },
     results: { type: 'json', description: 'Search/read summary results' },
-    attachments: { type: 'json', description: 'Downloaded attachments (if enabled)' },
+    attachments: { type: 'file[]', description: 'Downloaded attachments (if enabled)' },
+
+    // Draft-specific outputs
+    draftId: {
+      type: 'string',
+      description: 'Draft ID',
+      condition: { field: 'operation', value: 'draft_gmail' },
+    },
+    messageId: {
+      type: 'string',
+      description: 'Gmail message ID for the draft',
+      condition: { field: 'operation', value: 'draft_gmail' },
+    },
 
     // Trigger outputs (unchanged)
     email_id: { type: 'string', description: 'Gmail message ID' },

@@ -2,21 +2,27 @@ import { createLogger } from '@sim/logger'
 import {
   AirtableIcon,
   AsanaIcon,
+  AttioIcon,
+  CalComIcon,
   ConfluenceIcon,
   DropboxIcon,
   GithubIcon,
   GmailIcon,
+  GoogleBigQueryIcon,
   GoogleCalendarIcon,
+  GoogleContactsIcon,
   GoogleDocsIcon,
   GoogleDriveIcon,
   GoogleFormsIcon,
   GoogleGroupsIcon,
   GoogleIcon,
   GoogleSheetsIcon,
+  GoogleTasksIcon,
   HubspotIcon,
   JiraIcon,
   LinearIcon,
   LinkedInIcon,
+  MicrosoftDataverseIcon,
   MicrosoftExcelIcon,
   MicrosoftIcon,
   MicrosoftOneDriveIcon,
@@ -116,6 +122,30 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderConfig> = {
         baseProviderIcon: GoogleIcon,
         scopes: ['https://www.googleapis.com/auth/calendar'],
       },
+      'google-contacts': {
+        name: 'Google Contacts',
+        description: 'Create, read, update, and search contacts with Google Contacts.',
+        providerId: 'google-contacts',
+        icon: GoogleContactsIcon,
+        baseProviderIcon: GoogleIcon,
+        scopes: ['https://www.googleapis.com/auth/contacts'],
+      },
+      'google-bigquery': {
+        name: 'Google BigQuery',
+        description: 'Query, list, and insert data in Google BigQuery.',
+        providerId: 'google-bigquery',
+        icon: GoogleBigQueryIcon,
+        baseProviderIcon: GoogleIcon,
+        scopes: ['https://www.googleapis.com/auth/bigquery'],
+      },
+      'google-tasks': {
+        name: 'Google Tasks',
+        description: 'Create, manage, and organize tasks with Google Tasks.',
+        providerId: 'google-tasks',
+        icon: GoogleTasksIcon,
+        baseProviderIcon: GoogleIcon,
+        scopes: ['https://www.googleapis.com/auth/tasks'],
+      },
       'google-vault': {
         name: 'Google Vault',
         description: 'Search, export, and manage matters/holds via Google Vault.',
@@ -153,6 +183,20 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderConfig> = {
     name: 'Microsoft',
     icon: MicrosoftIcon,
     services: {
+      'microsoft-dataverse': {
+        name: 'Microsoft Dataverse',
+        description: 'Connect to Microsoft Dataverse and manage records.',
+        providerId: 'microsoft-dataverse',
+        icon: MicrosoftDataverseIcon,
+        baseProviderIcon: MicrosoftIcon,
+        scopes: [
+          'openid',
+          'profile',
+          'email',
+          'https://dynamics.microsoft.com/user_impersonation',
+          'offline_access',
+        ],
+      },
       'microsoft-excel': {
         name: 'Microsoft Excel',
         description: 'Connect to Microsoft Excel and manage spreadsheets.',
@@ -275,7 +319,23 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderConfig> = {
         providerId: 'x',
         icon: xIcon,
         baseProviderIcon: xIcon,
-        scopes: ['tweet.read', 'tweet.write', 'users.read', 'offline.access'],
+        scopes: [
+          'tweet.read',
+          'tweet.write',
+          'tweet.moderate.write',
+          'users.read',
+          'follows.read',
+          'follows.write',
+          'bookmark.read',
+          'bookmark.write',
+          'like.read',
+          'like.write',
+          'block.read',
+          'block.write',
+          'mute.read',
+          'mute.write',
+          'offline.access',
+        ],
       },
     },
     defaultService: 'x',
@@ -313,6 +373,21 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderConfig> = {
           'search:confluence',
           'read:me',
           'offline_access',
+          'read:blogpost:confluence',
+          'write:blogpost:confluence',
+          'delete:blogpost:confluence',
+          'read:content.property:confluence',
+          'write:content.property:confluence',
+          'read:hierarchical-content:confluence',
+          'read:content.metadata:confluence',
+          'read:user:confluence',
+          'read:task:confluence',
+          'write:task:confluence',
+          'write:space:confluence',
+          'delete:space:confluence',
+          'read:space.property:confluence',
+          'write:space.property:confluence',
+          'read:space.permission:confluence',
         ],
       },
     },
@@ -613,6 +688,46 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderConfig> = {
     },
     defaultService: 'asana',
   },
+  attio: {
+    name: 'Attio',
+    icon: AttioIcon,
+    services: {
+      attio: {
+        name: 'Attio',
+        description: 'Manage records, notes, tasks, lists, comments, and more in Attio CRM.',
+        providerId: 'attio',
+        icon: AttioIcon,
+        baseProviderIcon: AttioIcon,
+        scopes: [
+          'record_permission:read-write',
+          'object_configuration:read-write',
+          'list_configuration:read-write',
+          'list_entry:read-write',
+          'note:read-write',
+          'task:read-write',
+          'comment:read-write',
+          'user_management:read',
+          'webhook:read-write',
+        ],
+      },
+    },
+    defaultService: 'attio',
+  },
+  calcom: {
+    name: 'Cal.com',
+    icon: CalComIcon,
+    services: {
+      calcom: {
+        name: 'Cal.com',
+        description: 'Manage Cal.com bookings, event types, and schedules.',
+        providerId: 'calcom',
+        icon: CalComIcon,
+        baseProviderIcon: CalComIcon,
+        scopes: [],
+      },
+    },
+    defaultService: 'calcom',
+  },
   pipedrive: {
     name: 'Pipedrive',
     icon: PipedriveIcon,
@@ -789,6 +904,11 @@ interface ProviderAuthConfig {
   useBasicAuth: boolean
   additionalHeaders?: Record<string, string>
   supportsRefreshTokenRotation?: boolean
+  /**
+   * If true, the refresh token is sent in the Authorization header as Bearer token
+   * instead of in the request body. Used by Cal.com.
+   */
+  refreshTokenInAuthHeader?: boolean
 }
 
 /**
@@ -861,6 +981,21 @@ function getProviderAuthConfig(provider: string): ProviderAuthConfig {
         supportsRefreshTokenRotation: true,
       }
     }
+    case 'calcom': {
+      const clientId = env.CALCOM_CLIENT_ID
+      if (!clientId) {
+        throw new Error('Missing CALCOM_CLIENT_ID')
+      }
+      return {
+        tokenEndpoint: 'https://app.cal.com/api/auth/oauth/refreshToken',
+        clientId,
+        clientSecret: '',
+        useBasicAuth: false,
+        supportsRefreshTokenRotation: true,
+        // Cal.com requires refresh token in Authorization header, not body
+        refreshTokenInAuthHeader: true,
+      }
+    }
     case 'airtable': {
       const { clientId, clientSecret } = getCredentials(
         env.AIRTABLE_CLIENT_ID,
@@ -913,6 +1048,18 @@ function getProviderAuthConfig(provider: string): ProviderAuthConfig {
         clientSecret,
         useBasicAuth: true,
         supportsRefreshTokenRotation: true,
+      }
+    }
+    case 'attio': {
+      const { clientId, clientSecret } = getCredentials(
+        env.ATTIO_CLIENT_ID,
+        env.ATTIO_CLIENT_SECRET
+      )
+      return {
+        tokenEndpoint: 'https://app.attio.com/oauth/token',
+        clientId,
+        clientSecret,
+        useBasicAuth: false,
       }
     }
     case 'dropbox': {
@@ -1118,7 +1265,15 @@ function buildAuthRequest(
 
   const bodyParams: Record<string, string> = {
     grant_type: 'refresh_token',
-    refresh_token: refreshToken,
+  }
+
+  // Handle refresh token placement
+  if (config.refreshTokenInAuthHeader) {
+    // Cal.com style: refresh token in Authorization header as Bearer token
+    headers.Authorization = `Bearer ${refreshToken}`
+  } else {
+    // Standard OAuth: refresh token in request body
+    bodyParams.refresh_token = refreshToken
   }
 
   if (config.useBasicAuth) {
@@ -1128,7 +1283,9 @@ function buildAuthRequest(
   } else {
     // Use body credentials - include client credentials in request body
     bodyParams.client_id = config.clientId
-    bodyParams.client_secret = config.clientSecret
+    if (config.clientSecret) {
+      bodyParams.client_secret = config.clientSecret
+    }
   }
 
   return { headers, bodyParams }

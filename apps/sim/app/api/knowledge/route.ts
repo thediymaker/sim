@@ -1,6 +1,7 @@
 import { createLogger } from '@sim/logger'
 import { type NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
+import { AuditAction, AuditResourceType, recordAudit } from '@/lib/audit/log'
 import { getSession } from '@/lib/auth'
 import { PlatformEvents } from '@/lib/core/telemetry'
 import { generateRequestId } from '@/lib/core/utils/request'
@@ -19,9 +20,9 @@ const logger = createLogger('KnowledgeBaseAPI')
 const CreateKnowledgeBaseSchema = z.object({
   name: z.string().min(1, 'Name is required'),
   description: z.string().optional(),
-  workspaceId: z.string().optional(),
-  embeddingModel: z.string().default('text-embedding-3-small'),
-  embeddingDimension: z.number().default(1536),
+  workspaceId: z.string().min(1, 'Workspace ID is required'),
+  embeddingModel: z.literal('text-embedding-3-small').default('text-embedding-3-small'),
+  embeddingDimension: z.literal(1536).default(1536),
   chunkingConfig: z
     .object({
       /** Maximum chunk size in tokens (1 token ≈ 4 characters) */
@@ -108,6 +109,20 @@ export async function POST(req: NextRequest) {
       logger.info(
         `[${requestId}] Knowledge base created: ${newKnowledgeBase.id} for user ${session.user.id}`
       )
+
+      recordAudit({
+        workspaceId: validatedData.workspaceId,
+        actorId: session.user.id,
+        actorName: session.user.name,
+        actorEmail: session.user.email,
+        action: AuditAction.KNOWLEDGE_BASE_CREATED,
+        resourceType: AuditResourceType.KNOWLEDGE_BASE,
+        resourceId: newKnowledgeBase.id,
+        resourceName: validatedData.name,
+        description: `Created knowledge base "${validatedData.name}"`,
+        metadata: { name: validatedData.name },
+        request: req,
+      })
 
       return NextResponse.json({
         success: true,

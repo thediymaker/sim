@@ -185,6 +185,16 @@ function ServerDetailView({ workspaceId, serverId, onBack }: ServerDetailViewPro
         return `claude mcp add "${safeName}" --url "${mcpServerUrl}" --header "X-API-Key:$SIM_API_KEY"`
       }
 
+      // Cursor supports direct URL configuration (no mcp-remote needed)
+      if (client === 'cursor') {
+        const cursorConfig = isPublic
+          ? { url: mcpServerUrl }
+          : { url: mcpServerUrl, headers: { 'X-API-Key': '$SIM_API_KEY' } }
+
+        return JSON.stringify({ mcpServers: { [safeName]: cursorConfig } }, null, 2)
+      }
+
+      // Claude Desktop and VS Code still use mcp-remote (stdio transport)
       const mcpRemoteArgs = isPublic
         ? ['-y', 'mcp-remote', mcpServerUrl]
         : ['-y', 'mcp-remote', mcpServerUrl, '--header', 'X-API-Key:$SIM_API_KEY']
@@ -265,14 +275,8 @@ function ServerDetailView({ workspaceId, serverId, onBack }: ServerDetailViewPro
         .replace(/[^a-z0-9-]/g, '')
 
       const config = isPublic
-        ? {
-            command: 'npx',
-            args: ['-y', 'mcp-remote', mcpServerUrl],
-          }
-        : {
-            command: 'npx',
-            args: ['-y', 'mcp-remote', mcpServerUrl, '--header', 'X-API-Key:$SIM_API_KEY'],
-          }
+        ? { url: mcpServerUrl }
+        : { url: mcpServerUrl, headers: { 'X-API-Key': '$SIM_API_KEY' } }
 
       const base64Config = btoa(JSON.stringify(config))
       return `cursor://anysphere.cursor-deeplink/mcp/install?name=${encodeURIComponent(safeName)}&config=${encodeURIComponent(base64Config)}`
@@ -480,12 +484,12 @@ function ServerDetailView({ workspaceId, serverId, onBack }: ServerDetailViewPro
                     {activeConfigTab === 'cursor' && (
                       <a
                         href={getCursorInstallUrl(server.isPublic, server.name)}
-                        className='absolute top-[6px] right-2'
+                        className='absolute top-[6px] right-2 inline-flex rounded-[6px] bg-[var(--surface-5)] ring-1 ring-[var(--border-1)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-primary)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface-2)]'
                       >
                         <img
                           src='https://cursor.com/deeplink/mcp-install-dark.svg'
                           alt='Add to Cursor'
-                          className='h-[26px]'
+                          className='h-[26px] rounded-[6px] align-middle'
                         />
                       </a>
                     )}
@@ -607,10 +611,12 @@ function ServerDetailView({ workspaceId, serverId, onBack }: ServerDetailViewPro
                                 <span className='block truncate font-medium text-[14px] text-[var(--text-tertiary)]'>
                                   {name}
                                 </span>
-                                <Badge size='sm'>{prop.type || 'any'}</Badge>
+                                <Badge variant='type' size='sm'>
+                                  {prop.type || 'any'}
+                                </Badge>
                               </div>
                             </div>
-                            <div className='border-[var(--border-1)] border-t px-[10px] pt-[6px] pb-[10px]'>
+                            <div className='rounded-b-[4px] border-[var(--border-1)] border-t bg-[var(--surface-2)] px-[10px] pt-[6px] pb-[10px]'>
                               <div className='flex flex-col gap-[6px]'>
                                 <Label className='text-[13px]'>Description</Label>
                                 <EmcnInput

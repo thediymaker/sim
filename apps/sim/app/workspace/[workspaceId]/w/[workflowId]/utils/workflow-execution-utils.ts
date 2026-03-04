@@ -5,12 +5,42 @@ import { useTerminalConsoleStore } from '@/stores/terminal'
 import { useWorkflowRegistry } from '@/stores/workflows/registry/store'
 import { useWorkflowStore } from '@/stores/workflows/workflow/store'
 
+/**
+ * Updates the active blocks set and ref counts for a single block.
+ * Ref counting ensures a block stays active until all parallel branches for it complete.
+ */
+export function updateActiveBlockRefCount(
+  refCounts: Map<string, number>,
+  activeSet: Set<string>,
+  blockId: string,
+  isActive: boolean
+): void {
+  if (isActive) {
+    refCounts.set(blockId, (refCounts.get(blockId) ?? 0) + 1)
+    activeSet.add(blockId)
+  } else {
+    const next = (refCounts.get(blockId) ?? 1) - 1
+    if (next <= 0) {
+      refCounts.delete(blockId)
+      activeSet.delete(blockId)
+    } else {
+      refCounts.set(blockId, next)
+    }
+  }
+}
+
 export interface WorkflowExecutionOptions {
   workflowInput?: any
   onStream?: (se: StreamingExecution) => Promise<void>
   executionId?: string
   onBlockComplete?: (blockId: string, output: any) => Promise<void>
-  overrideTriggerType?: 'chat' | 'manual' | 'api'
+  overrideTriggerType?: 'chat' | 'manual' | 'api' | 'copilot'
+  stopAfterBlockId?: string
+  /** For run_from_block / run_block: start from a specific block using cached state */
+  runFromBlock?: {
+    startBlockId: string
+    executionId?: string
+  }
 }
 
 /**
@@ -29,9 +59,11 @@ export async function executeWorkflowWithFullLogging(
   const executionId = options.executionId || uuidv4()
   const { addConsole } = useTerminalConsoleStore.getState()
   const { setActiveBlocks, setBlockRunStatus, setEdgeRunStatus } = useExecutionStore.getState()
+  const wfId = activeWorkflowId
   const workflowEdges = useWorkflowStore.getState().edges
 
   const activeBlocksSet = new Set<string>()
+  const activeBlockRefCounts = new Map<string, number>()
 
   const payload: any = {
     input: options.workflowInput,
@@ -39,6 +71,15 @@ export async function executeWorkflowWithFullLogging(
     triggerType: options.overrideTriggerType || 'manual',
     useDraftState: true,
     isClientSession: true,
+    ...(options.stopAfterBlockId ? { stopAfterBlockId: options.stopAfterBlockId } : {}),
+    ...(options.runFromBlock
+      ? {
+          runFromBlock: {
+            startBlockId: options.runFromBlock.startBlockId,
+            executionId: options.runFromBlock.executionId || 'latest',
+          },
+        }
+      : {}),
   }
 
   const response = await fetch(`/api/workflows/${activeWorkflowId}/execute`, {
@@ -87,23 +128,33 @@ export async function executeWorkflowWithFullLogging(
 
           switch (event.type) {
             case 'block:started': {
-              activeBlocksSet.add(event.data.blockId)
-              setActiveBlocks(new Set(activeBlocksSet))
+              updateActiveBlockRefCount(
+                activeBlockRefCounts,
+                activeBlocksSet,
+                event.data.blockId,
+                true
+              )
+              setActiveBlocks(wfId, new Set(activeBlocksSet))
 
               const incomingEdges = workflowEdges.filter(
                 (edge) => edge.target === event.data.blockId
               )
               incomingEdges.forEach((edge) => {
-                setEdgeRunStatus(edge.id, 'success')
+                setEdgeRunStatus(wfId, edge.id, 'success')
               })
               break
             }
 
-            case 'block:completed':
-              activeBlocksSet.delete(event.data.blockId)
-              setActiveBlocks(new Set(activeBlocksSet))
+            case 'block:completed': {
+              updateActiveBlockRefCount(
+                activeBlockRefCounts,
+                activeBlocksSet,
+                event.data.blockId,
+                false
+              )
+              setActiveBlocks(wfId, new Set(activeBlocksSet))
 
-              setBlockRunStatus(event.data.blockId, 'success')
+              setBlockRunStatus(wfId, event.data.blockId, 'success')
 
               addConsole({
                 input: event.data.input || {},
@@ -111,6 +162,7 @@ export async function executeWorkflowWithFullLogging(
                 success: true,
                 durationMs: event.data.durationMs,
                 startedAt: new Date(Date.now() - event.data.durationMs).toISOString(),
+                executionOrder: event.data.executionOrder,
                 endedAt: new Date().toISOString(),
                 workflowId: activeWorkflowId,
                 blockId: event.data.blockId,
@@ -120,18 +172,28 @@ export async function executeWorkflowWithFullLogging(
                 iterationCurrent: event.data.iterationCurrent,
                 iterationTotal: event.data.iterationTotal,
                 iterationType: event.data.iterationType,
+                iterationContainerId: event.data.iterationContainerId,
+                childWorkflowBlockId: event.data.childWorkflowBlockId,
+                childWorkflowName: event.data.childWorkflowName,
+                childWorkflowInstanceId: event.data.childWorkflowInstanceId,
               })
 
               if (options.onBlockComplete) {
                 options.onBlockComplete(event.data.blockId, event.data.output).catch(() => {})
               }
               break
+            }
 
-            case 'block:error':
-              activeBlocksSet.delete(event.data.blockId)
-              setActiveBlocks(new Set(activeBlocksSet))
+            case 'block:error': {
+              updateActiveBlockRefCount(
+                activeBlockRefCounts,
+                activeBlocksSet,
+                event.data.blockId,
+                false
+              )
+              setActiveBlocks(wfId, new Set(activeBlocksSet))
 
-              setBlockRunStatus(event.data.blockId, 'error')
+              setBlockRunStatus(wfId, event.data.blockId, 'error')
 
               addConsole({
                 input: event.data.input || {},
@@ -140,6 +202,7 @@ export async function executeWorkflowWithFullLogging(
                 error: event.data.error,
                 durationMs: event.data.durationMs,
                 startedAt: new Date(Date.now() - event.data.durationMs).toISOString(),
+                executionOrder: event.data.executionOrder,
                 endedAt: new Date().toISOString(),
                 workflowId: activeWorkflowId,
                 blockId: event.data.blockId,
@@ -149,8 +212,31 @@ export async function executeWorkflowWithFullLogging(
                 iterationCurrent: event.data.iterationCurrent,
                 iterationTotal: event.data.iterationTotal,
                 iterationType: event.data.iterationType,
+                iterationContainerId: event.data.iterationContainerId,
+                childWorkflowBlockId: event.data.childWorkflowBlockId,
+                childWorkflowName: event.data.childWorkflowName,
+                childWorkflowInstanceId: event.data.childWorkflowInstanceId,
               })
               break
+            }
+
+            case 'block:childWorkflowStarted': {
+              const { updateConsole } = useTerminalConsoleStore.getState()
+              updateConsole(
+                event.data.blockId,
+                {
+                  childWorkflowInstanceId: event.data.childWorkflowInstanceId,
+                  ...(event.data.iterationCurrent !== undefined && {
+                    iterationCurrent: event.data.iterationCurrent,
+                  }),
+                  ...(event.data.iterationContainerId !== undefined && {
+                    iterationContainerId: event.data.iterationContainerId,
+                  }),
+                },
+                executionId
+              )
+              break
+            }
 
             case 'execution:completed':
               executionResult = {
@@ -175,7 +261,7 @@ export async function executeWorkflowWithFullLogging(
     }
   } finally {
     reader.releaseLock()
-    setActiveBlocks(new Set())
+    setActiveBlocks(wfId, new Set())
   }
 
   return executionResult

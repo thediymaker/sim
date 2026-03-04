@@ -1,15 +1,25 @@
 import { createLogger, type Logger } from '@sim/logger'
+import type OpenAI from 'openai'
 import type { ChatCompletionChunk } from 'openai/resources/chat/completions'
 import type { CompletionUsage } from 'openai/resources/completions'
 import { env } from '@/lib/core/config/env'
 import { isHosted } from '@/lib/core/config/feature-flags'
+import {
+  buildCanonicalIndex,
+  type CanonicalGroup,
+  getCanonicalValues,
+  isCanonicalPair,
+} from '@/lib/workflows/subblocks/visibility'
 import { isCustomTool } from '@/executor/constants'
 import {
   getComputerUseModels,
   getEmbeddingModelPricing,
   getHostedModels as getHostedModelsFromDefinitions,
+  getMaxOutputTokensForModel as getMaxOutputTokensForModelFromDefinitions,
   getMaxTemperature as getMaxTempFromDefinitions,
   getModelPricing as getModelPricingFromDefinitions,
+  getModelsWithDeepResearch,
+  getModelsWithoutMemory,
   getModelsWithReasoningEffort,
   getModelsWithTemperatureSupport,
   getModelsWithTempRange01,
@@ -112,6 +122,8 @@ function buildProviderMetadata(providerId: ProviderId): ProviderMetadata {
 }
 
 export const providers: Record<ProviderId, ProviderMetadata> = {
+  ollama: buildProviderMetadata('ollama'),
+  vllm: buildProviderMetadata('vllm'),
   openai: {
     ...buildProviderMetadata('openai'),
     computerUseModels: ['computer-use-preview'],
@@ -124,17 +136,16 @@ export const providers: Record<ProviderId, ProviderMetadata> = {
   },
   google: buildProviderMetadata('google'),
   vertex: buildProviderMetadata('vertex'),
+  'azure-openai': buildProviderMetadata('azure-openai'),
+  'azure-anthropic': buildProviderMetadata('azure-anthropic'),
   deepseek: buildProviderMetadata('deepseek'),
   xai: buildProviderMetadata('xai'),
   cerebras: buildProviderMetadata('cerebras'),
   groq: buildProviderMetadata('groq'),
-
   litellm: buildProviderMetadata('litellm'),
   mistral: buildProviderMetadata('mistral'),
-  'azure-openai': buildProviderMetadata('azure-openai'),
-  openrouter: buildProviderMetadata('openrouter'),
-  ollama: buildProviderMetadata('ollama'),
   bedrock: buildProviderMetadata('bedrock'),
+  openrouter: buildProviderMetadata('openrouter'),
 }
 
 export function updateOllamaProviderModels(models: string[]): void {
@@ -142,16 +153,16 @@ export function updateOllamaProviderModels(models: string[]): void {
   providers.ollama.models = getProviderModelsFromDefinitions('ollama')
 }
 
-export function updateVLLMProviderModels(models: string[]): void {
-  const { updateVLLMModels } = require('@/providers/models')
-  updateVLLMModels(models)
-  providers.vllm.models = getProviderModelsFromDefinitions('vllm')
-}
-
 export function updateLiteLLMProviderModels(models: string[]): void {
   const { updateLiteLLMModels } = require('@/providers/models')
   updateLiteLLMModels(models)
   providers.litellm.models = getProviderModelsFromDefinitions('litellm')
+}
+
+export function updateVLLMProviderModels(models: string[]): void {
+  const { updateVLLMModels } = require('@/providers/models')
+  updateVLLMModels(models)
+  providers.vllm.models = getProviderModelsFromDefinitions('vllm')
 }
 
 export async function updateOpenRouterProviderModels(models: string[]): Promise<void> {
@@ -164,10 +175,7 @@ export function getBaseModelProviders(): Record<string, ProviderId> {
   const allProviders = Object.entries(providers)
     .filter(
       ([providerId]) =>
-        providerId !== 'ollama' &&
-        providerId !== 'vllm' &&
-        // providerId !== 'litellm' && // Allowed now
-        providerId !== 'openrouter'
+        providerId !== 'ollama' && providerId !== 'vllm' && providerId !== 'openrouter'
     )
     .reduce(
       (map, [providerId, config]) => {
@@ -214,10 +222,7 @@ export function getProviderFromModel(model: string): ProviderId {
 
   let providerId: ProviderId | null = null
 
-  // Check if the model is actually a provider ID (e.g., "litellm" from copilot selector)
-  if (normalizedModel in providers) {
-    providerId = normalizedModel as ProviderId
-  } else if (normalizedModel in getAllModelProviders()) {
+  if (normalizedModel in getAllModelProviders()) {
     providerId = getAllModelProviders()[normalizedModel]
   } else {
     for (const [id, config] of Object.entries(providers)) {
@@ -350,8 +355,8 @@ export function generateStructuredOutputInstructions(responseFormat: any): strin
     if (field.type === 'object' && field.properties) {
       return `{
     ${Object.entries(field.properties)
-          .map(([key, prop]: [string, any]) => `"${key}": ${prop.type === 'number' ? '0' : '"value"'}`)
-          .join(',\n    ')}
+      .map(([key, prop]: [string, any]) => `"${key}": ${prop.type === 'number' ? '0' : '"value"'}`)
+      .join(',\n    ')}
   }`
     }
     return field.type === 'string'
@@ -445,9 +450,10 @@ export async function transformBlockTool(
     getAllBlocks: () => any[]
     getTool: (toolId: string) => any
     getToolAsync?: (toolId: string) => Promise<any>
+    canonicalModes?: Record<string, 'basic' | 'advanced'>
   }
 ): Promise<ProviderToolConfig | null> {
-  const { selectedOperation, getAllBlocks, getTool, getToolAsync } = options
+  const { selectedOperation, getAllBlocks, getTool, getToolAsync, canonicalModes } = options
 
   const blockDef = getAllBlocks().find((b: any) => b.type === block.type)
   if (!blockDef) {
@@ -501,11 +507,14 @@ export async function transformBlockTool(
 
   const userProvidedParams = block.params || {}
 
-  const llmSchema = await createLLMToolSchema(toolConfig, userProvidedParams)
+  const { schema: llmSchema, enrichedDescription } = await createLLMToolSchema(
+    toolConfig,
+    userProvidedParams
+  )
 
   let uniqueToolId = toolConfig.id
   let toolName = toolConfig.name
-  let toolDescription = toolConfig.description
+  let toolDescription = enrichedDescription || toolConfig.description
 
   if (toolId === 'workflow_executor' && userProvidedParams.workflowId) {
     uniqueToolId = `${toolConfig.id}_${userProvidedParams.workflowId}`
@@ -522,7 +531,62 @@ export async function transformBlockTool(
     }
   } else if (toolId.startsWith('knowledge_') && userProvidedParams.knowledgeBaseId) {
     uniqueToolId = `${toolConfig.id}_${userProvidedParams.knowledgeBaseId}`
+  } else if (toolId.startsWith('table_') && userProvidedParams.tableId) {
+    uniqueToolId = `${toolConfig.id}_${userProvidedParams.tableId}`
   }
+
+  const blockParamsFn = blockDef?.tools?.config?.params as
+    | ((p: Record<string, any>) => Record<string, any>)
+    | undefined
+  const blockInputDefs = blockDef?.inputs as Record<string, any> | undefined
+
+  const canonicalGroups: CanonicalGroup[] = blockDef?.subBlocks
+    ? Object.values(buildCanonicalIndex(blockDef.subBlocks).groupsById).filter(isCanonicalPair)
+    : []
+
+  const needsTransform = blockParamsFn || blockInputDefs || canonicalGroups.length > 0
+  const paramsTransform = needsTransform
+    ? (params: Record<string, any>): Record<string, any> => {
+        let result = { ...params }
+
+        for (const group of canonicalGroups) {
+          const { basicValue, advancedValue } = getCanonicalValues(group, result)
+          const scopedKey = `${block.type}:${group.canonicalId}`
+          const pairMode = canonicalModes?.[scopedKey] ?? 'basic'
+          const chosen = pairMode === 'advanced' ? advancedValue : basicValue
+
+          const sourceIds = [group.basicId, ...group.advancedIds].filter(Boolean) as string[]
+          sourceIds.forEach((id) => delete result[id])
+
+          if (chosen !== undefined) {
+            result[group.canonicalId] = chosen
+          }
+        }
+
+        if (blockParamsFn) {
+          const transformed = blockParamsFn(result)
+          result = { ...result, ...transformed }
+        }
+
+        if (blockInputDefs) {
+          for (const [key, schema] of Object.entries(blockInputDefs)) {
+            const value = result[key]
+            if (typeof value === 'string' && value.trim().length > 0) {
+              const inputType = typeof schema === 'object' ? schema.type : schema
+              if (inputType === 'json' || inputType === 'array') {
+                try {
+                  result[key] = JSON.parse(value.trim())
+                } catch {
+                  // Not valid JSON — keep as string
+                }
+              }
+            }
+          }
+        }
+
+        return result
+      }
+    : undefined
 
   return {
     id: uniqueToolId,
@@ -530,6 +594,7 @@ export async function transformBlockTool(
     description: toolDescription,
     params: userProvidedParams,
     parameters: llmSchema,
+    paramsTransform,
   }
 }
 
@@ -664,9 +729,9 @@ export function getApiKey(provider: string, model: string, userProvidedKey?: str
   }
 
   const isLiteLLMModel =
-    provider === 'litellm' || useProvidersStore.getState().providers.litellm.models.includes(model)
+    provider === 'litellm' || useProvidersStore.getState().providers.litellm?.models.includes(model)
   if (isLiteLLMModel) {
-    return userProvidedKey || 'empty'
+    return userProvidedKey || env.LITELLM_API_KEY || 'empty'
   }
 
   // Bedrock uses its own credentials (bedrockAccessKeyId/bedrockSecretKey), not apiKey
@@ -722,12 +787,12 @@ export function prepareToolsWithUsageControl(
 ): {
   tools: any[] | undefined
   toolChoice:
-  | 'auto'
-  | 'none'
-  | { type: 'function'; function: { name: string } }
-  | { type: 'tool'; name: string }
-  | { type: 'any'; any: { model: string; name: string } }
-  | undefined
+    | 'auto'
+    | 'none'
+    | { type: 'function'; function: { name: string } }
+    | { type: 'tool'; name: string }
+    | { type: 'any'; any: { model: string; name: string } }
+    | undefined
   toolConfig?: {
     functionCallingConfig: {
       mode: 'AUTO' | 'ANY' | 'NONE'
@@ -781,11 +846,11 @@ export function prepareToolsWithUsageControl(
 
   let toolConfig:
     | {
-      functionCallingConfig: {
-        mode: 'AUTO' | 'ANY' | 'NONE'
-        allowedFunctionNames?: string[]
+        functionCallingConfig: {
+          mode: 'AUTO' | 'ANY' | 'NONE'
+          allowedFunctionNames?: string[]
+        }
       }
-    }
     | undefined
 
   if (forcedTools.length > 0) {
@@ -857,11 +922,11 @@ export function trackForcedToolUsage(
   hasUsedForcedTool: boolean
   usedForcedTools: string[]
   nextToolChoice?:
-  | 'auto'
-  | { type: 'function'; function: { name: string } }
-  | { type: 'tool'; name: string }
-  | { type: 'any'; any: { model: string; name: string } }
-  | null
+    | 'auto'
+    | { type: 'function'; function: { name: string } }
+    | { type: 'tool'; name: string }
+    | { type: 'any'; any: { model: string; name: string } }
+    | null
   nextToolConfig?: {
     functionCallingConfig: {
       mode: 'AUTO' | 'ANY' | 'NONE'
@@ -873,11 +938,11 @@ export function trackForcedToolUsage(
   let nextToolChoice = originalToolChoice
   let nextToolConfig:
     | {
-      functionCallingConfig: {
-        mode: 'AUTO' | 'ANY' | 'NONE'
-        allowedFunctionNames?: string[]
+        functionCallingConfig: {
+          mode: 'AUTO' | 'ANY' | 'NONE'
+          allowedFunctionNames?: string[]
+        }
       }
-    }
     | undefined
 
   const updatedUsedForcedTools = [...usedForcedTools]
@@ -895,8 +960,8 @@ export function trackForcedToolUsage(
   ) {
     forcedToolNames = [
       originalToolChoice?.function?.name ||
-      originalToolChoice?.name ||
-      originalToolChoice?.any?.name,
+        originalToolChoice?.name ||
+        originalToolChoice?.any?.name,
     ].filter(Boolean)
   }
 
@@ -969,10 +1034,28 @@ export const MODELS_WITH_TEMPERATURE_SUPPORT = getModelsWithTemperatureSupport()
 export const MODELS_WITH_REASONING_EFFORT = getModelsWithReasoningEffort()
 export const MODELS_WITH_VERBOSITY = getModelsWithVerbosity()
 export const MODELS_WITH_THINKING = getModelsWithThinking()
+export const MODELS_WITH_DEEP_RESEARCH = getModelsWithDeepResearch()
+export const MODELS_WITHOUT_MEMORY = getModelsWithoutMemory()
 export const PROVIDERS_WITH_TOOL_USAGE_CONTROL = getProvidersWithToolUsageControl()
 
 export function supportsTemperature(model: string): boolean {
   return supportsTemperatureFromDefinitions(model)
+}
+
+export function supportsReasoningEffort(model: string): boolean {
+  return MODELS_WITH_REASONING_EFFORT.includes(model.toLowerCase())
+}
+
+export function supportsVerbosity(model: string): boolean {
+  return MODELS_WITH_VERBOSITY.includes(model.toLowerCase())
+}
+
+export function supportsThinking(model: string): boolean {
+  return MODELS_WITH_THINKING.includes(model.toLowerCase())
+}
+
+export function isDeepResearchModel(model: string): boolean {
+  return MODELS_WITH_DEEP_RESEARCH.includes(model.toLowerCase())
 }
 
 /**
@@ -1012,10 +1095,23 @@ export function getThinkingLevelsForModel(model: string): string[] | null {
 }
 
 /**
+ * Get max output tokens for a specific model.
+ *
+ * @param model - The model ID
+ */
+export function getMaxOutputTokensForModel(model: string): number {
+  return getMaxOutputTokensForModelFromDefinitions(model)
+}
+
+/**
  * Prepare tool execution parameters, separating tool parameters from system parameters
  */
 export function prepareToolExecution(
-  tool: { params?: Record<string, any>; parameters?: Record<string, any> },
+  tool: {
+    params?: Record<string, any>
+    parameters?: Record<string, any>
+    paramsTransform?: (params: Record<string, any>) => Record<string, any>
+  },
   llmArgs: Record<string, any>,
   request: {
     workflowId?: string
@@ -1027,28 +1123,37 @@ export function prepareToolExecution(
     blockData?: Record<string, any>
     blockNameMapping?: Record<string, string>
     isDeployedContext?: boolean
+    callChain?: string[]
   }
 ): {
   toolParams: Record<string, any>
   executionParams: Record<string, any>
 } {
-  // Use centralized merge logic from tools/params
-  const toolParams = mergeToolParameters(tool.params || {}, llmArgs) as Record<string, any>
+  let toolParams = mergeToolParameters(tool.params || {}, llmArgs) as Record<string, any>
+
+  if (tool.paramsTransform) {
+    try {
+      toolParams = tool.paramsTransform(toolParams)
+    } catch (err) {
+      logger.warn('paramsTransform failed, using raw params', { error: err })
+    }
+  }
 
   const executionParams = {
     ...toolParams,
     ...(request.workflowId
       ? {
-        _context: {
-          workflowId: request.workflowId,
-          ...(request.workspaceId ? { workspaceId: request.workspaceId } : {}),
-          ...(request.chatId ? { chatId: request.chatId } : {}),
-          ...(request.userId ? { userId: request.userId } : {}),
-          ...(request.isDeployedContext !== undefined
-            ? { isDeployedContext: request.isDeployedContext }
-            : {}),
-        },
-      }
+          _context: {
+            workflowId: request.workflowId,
+            ...(request.workspaceId ? { workspaceId: request.workspaceId } : {}),
+            ...(request.chatId ? { chatId: request.chatId } : {}),
+            ...(request.userId ? { userId: request.userId } : {}),
+            ...(request.isDeployedContext !== undefined
+              ? { isDeployedContext: request.isDeployedContext }
+              : {}),
+            ...(request.callChain ? { callChain: request.callChain } : {}),
+          },
+        }
       : {}),
     ...(request.environmentVariables ? { envVars: request.environmentVariables } : {}),
     ...(request.workflowVariables ? { workflowVariables: request.workflowVariables } : {}),
@@ -1131,8 +1236,8 @@ export function createOpenAICompatibleStream(
  * @returns Object with hasUsedForcedTool flag and updated usedForcedTools array
  */
 export function checkForForcedToolUsageOpenAI(
-  response: any,
-  toolChoice: string | { type: string; function?: { name: string }; name?: string; any?: any },
+  response: OpenAI.Chat.Completions.ChatCompletion,
+  toolChoice: string | { type: string; function?: { name: string }; name?: string },
   providerName: string,
   forcedTools: string[],
   usedForcedTools: string[],

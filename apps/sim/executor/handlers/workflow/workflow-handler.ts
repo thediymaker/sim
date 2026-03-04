@@ -1,15 +1,20 @@
 import { createLogger } from '@sim/logger'
+import { buildNextCallChain, validateCallChain } from '@/lib/execution/call-chain'
+import { snapshotService } from '@/lib/logs/execution/snapshot/service'
 import { buildTraceSpans } from '@/lib/logs/execution/trace-spans/trace-spans'
 import type { TraceSpan } from '@/lib/logs/types'
 import type { BlockOutput } from '@/blocks/types'
 import { Executor } from '@/executor'
 import { BlockType, DEFAULTS, HTTP } from '@/executor/constants'
+import { ChildWorkflowError } from '@/executor/errors/child-workflow-error'
+import type { IterationContext } from '@/executor/execution/types'
 import type {
   BlockHandler,
   ExecutionContext,
   ExecutionResult,
   StreamingExecution,
 } from '@/executor/types'
+import { hasExecutionResult } from '@/executor/utils/errors'
 import { buildAPIUrl, buildAuthHeaders } from '@/executor/utils/http'
 import { parseJSON } from '@/executor/utils/json'
 import { lazyCleanupInputMapping } from '@/executor/utils/lazy-cleanup'
@@ -42,6 +47,42 @@ export class WorkflowBlockHandler implements BlockHandler {
     block: SerializedBlock,
     inputs: Record<string, any>
   ): Promise<BlockOutput | StreamingExecution> {
+    return this._executeCore(ctx, block, inputs)
+  }
+
+  async executeWithNode(
+    ctx: ExecutionContext,
+    block: SerializedBlock,
+    inputs: Record<string, any>,
+    nodeMetadata: {
+      nodeId: string
+      loopId?: string
+      parallelId?: string
+      branchIndex?: number
+      branchTotal?: number
+      originalBlockId?: string
+      isLoopNode?: boolean
+      executionOrder?: number
+    }
+  ): Promise<BlockOutput | StreamingExecution> {
+    return this._executeCore(ctx, block, inputs, nodeMetadata)
+  }
+
+  private async _executeCore(
+    ctx: ExecutionContext,
+    block: SerializedBlock,
+    inputs: Record<string, any>,
+    nodeMetadata?: {
+      nodeId: string
+      loopId?: string
+      parallelId?: string
+      branchIndex?: number
+      branchTotal?: number
+      originalBlockId?: string
+      isLoopNode?: boolean
+      executionOrder?: number
+    }
+  ): Promise<BlockOutput | StreamingExecution> {
     logger.info(`Executing workflow block: ${block.id}`)
 
     const workflowId = inputs.workflowId
@@ -50,12 +91,26 @@ export class WorkflowBlockHandler implements BlockHandler {
       throw new Error('No workflow selected for execution')
     }
 
-    try {
-      const currentDepth = (ctx.workflowId?.split('_sub_').length || 1) - 1
-      if (currentDepth >= DEFAULTS.MAX_WORKFLOW_DEPTH) {
-        throw new Error(`Maximum workflow nesting depth of ${DEFAULTS.MAX_WORKFLOW_DEPTH} exceeded`)
-      }
+    // Initialize with registry name, will be updated with loaded workflow name
+    const { workflows } = useWorkflowRegistry.getState()
+    const workflowMetadata = workflows[workflowId]
+    let childWorkflowName = workflowMetadata?.name || workflowId
 
+    // Unique ID per invocation — used to correlate child block events with this specific
+    // workflow block execution, preventing cross-iteration child mixing in loop contexts.
+    const instanceId = crypto.randomUUID()
+
+    const childCallChain = buildNextCallChain(ctx.callChain || [], workflowId)
+    const depthError = validateCallChain(childCallChain)
+    if (depthError) {
+      throw new ChildWorkflowError({
+        message: depthError,
+        childWorkflowName,
+      })
+    }
+
+    let childWorkflowSnapshotId: string | undefined
+    try {
       if (ctx.isDeployedContext) {
         const hasActiveDeployment = await this.checkChildDeployment(workflowId)
         if (!hasActiveDeployment) {
@@ -73,12 +128,11 @@ export class WorkflowBlockHandler implements BlockHandler {
         throw new Error(`Child workflow ${workflowId} not found`)
       }
 
-      const { workflows } = useWorkflowRegistry.getState()
-      const workflowMetadata = workflows[workflowId]
-      const childWorkflowName = workflowMetadata?.name || childWorkflow.name || 'Unknown Workflow'
+      // Update with loaded workflow name (more reliable than registry)
+      childWorkflowName = workflowMetadata?.name || childWorkflow.name || 'Unknown Workflow'
 
       logger.info(
-        `Executing child workflow: ${childWorkflowName} (${workflowId}) at depth ${currentDepth}`
+        `Executing child workflow: ${childWorkflowName} (${workflowId}), call chain depth ${ctx.callChain?.length || 0}`
       )
 
       let childWorkflowInput: Record<string, any> = {}
@@ -101,6 +155,30 @@ export class WorkflowBlockHandler implements BlockHandler {
         childWorkflowInput = inputs.input
       }
 
+      const childSnapshotResult = await snapshotService.createSnapshotWithDeduplication(
+        workflowId,
+        childWorkflow.workflowState
+      )
+      childWorkflowSnapshotId = childSnapshotResult.snapshot.id
+
+      const childDepth = (ctx.childWorkflowContext?.depth ?? 0) + 1
+      const shouldPropagateCallbacks = childDepth <= DEFAULTS.MAX_SSE_CHILD_DEPTH
+
+      if (shouldPropagateCallbacks) {
+        const effectiveBlockId = nodeMetadata
+          ? (nodeMetadata.originalBlockId ?? nodeMetadata.nodeId)
+          : block.id
+        const iterationContext = nodeMetadata
+          ? this.getIterationContext(ctx, nodeMetadata)
+          : undefined
+        ctx.onChildWorkflowInstanceReady?.(
+          effectiveBlockId,
+          instanceId,
+          iterationContext,
+          nodeMetadata?.executionOrder
+        )
+      }
+
       const subExecutor = new Executor({
         workflow: childWorkflow.serializedState,
         workflowInput: childWorkflowInput,
@@ -109,9 +187,24 @@ export class WorkflowBlockHandler implements BlockHandler {
         contextExtensions: {
           isChildExecution: true,
           isDeployedContext: ctx.isDeployedContext === true,
+          enforceCredentialAccess: ctx.enforceCredentialAccess,
           workspaceId: ctx.workspaceId,
           userId: ctx.userId,
           executionId: ctx.executionId,
+          abortSignal: ctx.abortSignal,
+          callChain: childCallChain,
+          ...(shouldPropagateCallbacks && {
+            onBlockStart: ctx.onBlockStart,
+            onBlockComplete: ctx.onBlockComplete,
+            onStream: ctx.onStream as ((streamingExecution: unknown) => Promise<void>) | undefined,
+            onChildWorkflowInstanceReady: ctx.onChildWorkflowInstanceReady,
+            childWorkflowContext: {
+              parentBlockId: instanceId,
+              workflowName: childWorkflowName,
+              workflowId,
+              depth: childDepth,
+            },
+          }),
         },
       })
 
@@ -133,55 +226,146 @@ export class WorkflowBlockHandler implements BlockHandler {
         workflowId,
         childWorkflowName,
         duration,
-        childTraceSpans
+        instanceId,
+        childTraceSpans,
+        childWorkflowSnapshotId
       )
 
       return mappedResult
-    } catch (error: any) {
+    } catch (error: unknown) {
       logger.error(`Error executing child workflow ${workflowId}:`, error)
 
-      const { workflows } = useWorkflowRegistry.getState()
-      const workflowMetadata = workflows[workflowId]
-      const childWorkflowName = workflowMetadata?.name || workflowId
+      let childTraceSpans: WorkflowTraceSpan[] = []
+      let executionResult: ExecutionResult | undefined
 
-      if (error.executionResult?.logs) {
-        const executionResult = error.executionResult as ExecutionResult
+      if (hasExecutionResult(error) && error.executionResult.logs) {
+        executionResult = error.executionResult
 
         logger.info(`Extracting child trace spans from error.executionResult`, {
           hasLogs: (executionResult.logs?.length ?? 0) > 0,
           logCount: executionResult.logs?.length ?? 0,
         })
 
-        const childTraceSpans = this.captureChildWorkflowLogs(
-          executionResult,
-          childWorkflowName,
-          ctx
-        )
+        childTraceSpans = this.captureChildWorkflowLogs(executionResult, childWorkflowName, ctx)
 
         logger.info(`Captured ${childTraceSpans.length} child trace spans from failed execution`)
-
-        return {
-          success: false,
-          childWorkflowName,
-          result: {},
-          error: error.message || 'Child workflow execution failed',
-          childTraceSpans: childTraceSpans,
-        } as Record<string, any>
+      } else if (ChildWorkflowError.isChildWorkflowError(error)) {
+        childTraceSpans = error.childTraceSpans
       }
 
-      if (error.childTraceSpans && Array.isArray(error.childTraceSpans)) {
-        return {
-          success: false,
-          childWorkflowName,
-          result: {},
-          error: error.message || 'Child workflow execution failed',
-          childTraceSpans: error.childTraceSpans,
-        } as Record<string, any>
-      }
+      // Build a cleaner error message for nested workflow errors
+      const errorMessage = this.buildNestedWorkflowErrorMessage(childWorkflowName, error)
 
-      const originalError = error.message || 'Unknown error'
-      throw new Error(`Error in child workflow "${childWorkflowName}": ${originalError}`)
+      throw new ChildWorkflowError({
+        message: errorMessage,
+        childWorkflowName,
+        childTraceSpans,
+        executionResult,
+        childWorkflowSnapshotId,
+        childWorkflowInstanceId: instanceId,
+        cause: error instanceof Error ? error : undefined,
+      })
     }
+  }
+
+  private getIterationContext(
+    ctx: ExecutionContext,
+    nodeMetadata: {
+      loopId?: string
+      parallelId?: string
+      branchIndex?: number
+      branchTotal?: number
+      isLoopNode?: boolean
+    }
+  ): IterationContext | undefined {
+    if (nodeMetadata.branchIndex !== undefined && nodeMetadata.branchTotal !== undefined) {
+      return {
+        iterationCurrent: nodeMetadata.branchIndex,
+        iterationTotal: nodeMetadata.branchTotal,
+        iterationType: 'parallel',
+        iterationContainerId: nodeMetadata.parallelId,
+      }
+    }
+
+    if (nodeMetadata.isLoopNode && nodeMetadata.loopId) {
+      const loopScope = ctx.loopExecutions?.get(nodeMetadata.loopId)
+      if (loopScope && loopScope.iteration !== undefined) {
+        return {
+          iterationCurrent: loopScope.iteration,
+          iterationTotal: loopScope.maxIterations,
+          iterationType: 'loop',
+          iterationContainerId: nodeMetadata.loopId,
+        }
+      }
+    }
+
+    return undefined
+  }
+
+  /**
+   * Builds a cleaner error message for nested workflow errors.
+   * Parses nested error messages to extract workflow chain and root error.
+   */
+  private buildNestedWorkflowErrorMessage(childWorkflowName: string, error: unknown): string {
+    const originalError = error instanceof Error ? error.message : 'Unknown error'
+
+    // Extract any nested workflow names from the error message
+    const { chain, rootError } = this.parseNestedWorkflowError(originalError)
+
+    // Add current workflow to the beginning of the chain
+    chain.unshift(childWorkflowName)
+
+    // If we have a chain (nested workflows), format nicely
+    if (chain.length > 1) {
+      return `Workflow chain: ${chain.join(' → ')} | ${rootError}`
+    }
+
+    // Single workflow failure
+    return `"${childWorkflowName}" failed: ${rootError}`
+  }
+
+  /**
+   * Parses a potentially nested workflow error message to extract:
+   * - The chain of workflow names
+   * - The actual root error message (preserving the block name prefix for the failing block)
+   *
+   * Handles formats like:
+   * - "workflow-name" failed: error
+   * - Block Name: "workflow-name" failed: error
+   * - Workflow chain: A → B | error
+   */
+  private parseNestedWorkflowError(message: string): { chain: string[]; rootError: string } {
+    const chain: string[] = []
+    const remaining = message
+
+    // First, check if it's already in chain format
+    const chainMatch = remaining.match(/^Workflow chain: (.+?) \| (.+)$/)
+    if (chainMatch) {
+      const chainPart = chainMatch[1]
+      const errorPart = chainMatch[2]
+      chain.push(...chainPart.split(' → ').map((s) => s.trim()))
+      return { chain, rootError: errorPart }
+    }
+
+    // Extract workflow names from patterns like:
+    // - "workflow-name" failed:
+    // - Block Name: "workflow-name" failed:
+    const workflowPattern = /(?:\[[^\]]+\]\s*)?(?:[^:]+:\s*)?"([^"]+)"\s*failed:\s*/g
+    let match: RegExpExecArray | null
+    let lastIndex = 0
+
+    match = workflowPattern.exec(remaining)
+    while (match !== null) {
+      chain.push(match[1])
+      lastIndex = match.index + match[0].length
+      match = workflowPattern.exec(remaining)
+    }
+
+    // The root error is everything after the last match
+    // Keep the block name prefix (e.g., Function 1:) so we know which block failed
+    const rootError = lastIndex > 0 ? remaining.slice(lastIndex) : remaining
+
+    return { chain, rootError: rootError.trim() || 'Unknown error' }
   }
 
   private async loadChildWorkflow(workflowId: string) {
@@ -220,6 +404,10 @@ export class WorkflowBlockHandler implements BlockHandler {
     )
 
     const workflowVariables = (workflowData.variables as Record<string, any>) || {}
+    const workflowStateWithVariables = {
+      ...workflowState,
+      variables: workflowVariables,
+    }
 
     if (Object.keys(workflowVariables).length > 0) {
       logger.info(
@@ -231,6 +419,7 @@ export class WorkflowBlockHandler implements BlockHandler {
       name: workflowData.name,
       serializedState: serializedWorkflow,
       variables: workflowVariables,
+      workflowState: workflowStateWithVariables,
       rawBlocks: workflowState.blocks,
     }
   }
@@ -299,11 +488,16 @@ export class WorkflowBlockHandler implements BlockHandler {
     )
 
     const workflowVariables = (wfData?.variables as Record<string, any>) || {}
+    const workflowStateWithVariables = {
+      ...deployedState,
+      variables: workflowVariables,
+    }
 
     return {
       name: wfData?.name || DEFAULTS.WORKFLOW_NAME,
       serializedState: serializedWorkflow,
       variables: workflowVariables,
+      workflowState: workflowStateWithVariables,
       rawBlocks: deployedState.blocks,
     }
   }
@@ -392,45 +586,6 @@ export class WorkflowBlockHandler implements BlockHandler {
     return processed
   }
 
-  private flattenChildWorkflowSpans(spans: TraceSpan[]): WorkflowTraceSpan[] {
-    const flattened: WorkflowTraceSpan[] = []
-
-    spans.forEach((span) => {
-      if (this.isSyntheticWorkflowWrapper(span)) {
-        if (span.children && Array.isArray(span.children)) {
-          flattened.push(...this.flattenChildWorkflowSpans(span.children))
-        }
-        return
-      }
-
-      const workflowSpan: WorkflowTraceSpan = {
-        ...span,
-      }
-
-      if (Array.isArray(workflowSpan.children)) {
-        const childSpans = workflowSpan.children as TraceSpan[]
-        workflowSpan.children = this.flattenChildWorkflowSpans(childSpans)
-      }
-
-      if (workflowSpan.output && typeof workflowSpan.output === 'object') {
-        const { childTraceSpans: nestedChildSpans, ...outputRest } = workflowSpan.output as {
-          childTraceSpans?: TraceSpan[]
-        } & Record<string, unknown>
-
-        if (Array.isArray(nestedChildSpans) && nestedChildSpans.length > 0) {
-          const flattenedNestedChildren = this.flattenChildWorkflowSpans(nestedChildSpans)
-          workflowSpan.children = [...(workflowSpan.children || []), ...flattenedNestedChildren]
-        }
-
-        workflowSpan.output = outputRest
-      }
-
-      flattened.push(workflowSpan)
-    })
-
-    return flattened
-  }
-
   private toExecutionResult(result: ExecutionResult | StreamingExecution): ExecutionResult {
     return 'execution' in result ? result.execution : result
   }
@@ -445,29 +600,32 @@ export class WorkflowBlockHandler implements BlockHandler {
     childWorkflowId: string,
     childWorkflowName: string,
     duration: number,
-    childTraceSpans?: WorkflowTraceSpan[]
+    instanceId: string,
+    childTraceSpans?: WorkflowTraceSpan[],
+    childWorkflowSnapshotId?: string
   ): BlockOutput {
     const success = childResult.success !== false
     const result = childResult.output || {}
 
     if (!success) {
       logger.warn(`Child workflow ${childWorkflowName} failed`)
-      // Return failure with child trace spans so they can be displayed
-      return {
-        success: false,
+      throw new ChildWorkflowError({
+        message: `"${childWorkflowName}" failed: ${childResult.error || 'Child workflow execution failed'}`,
         childWorkflowName,
-        result,
-        error: childResult.error || 'Child workflow execution failed',
         childTraceSpans: childTraceSpans || [],
-      } as Record<string, any>
+        childWorkflowSnapshotId,
+        childWorkflowInstanceId: instanceId,
+      })
     }
 
-    // Success case
     return {
       success: true,
       childWorkflowName,
+      childWorkflowId,
+      ...(childWorkflowSnapshotId ? { childWorkflowSnapshotId } : {}),
       result,
       childTraceSpans: childTraceSpans || [],
+      _childWorkflowInstanceId: instanceId,
     } as Record<string, any>
   }
 }

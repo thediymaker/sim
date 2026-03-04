@@ -3,8 +3,10 @@ import { account } from '@sim/db/schema'
 import { createLogger } from '@sim/logger'
 import { eq } from 'drizzle-orm'
 import { type NextRequest, NextResponse } from 'next/server'
+import { checkInternalAuth } from '@/lib/auth/hybrid'
 import { generateRequestId } from '@/lib/core/utils/request'
-import { refreshTokenIfNeeded } from '@/app/api/auth/oauth/utils'
+import { checkWorkspaceAccess } from '@/lib/workspaces/permissions/utils'
+import { refreshTokenIfNeeded, resolveOAuthAccountId } from '@/app/api/auth/oauth/utils'
 import type { StreamingExecution } from '@/executor/types'
 import { executeProviderRequest } from '@/providers'
 
@@ -20,6 +22,11 @@ export async function POST(request: NextRequest) {
   const startTime = Date.now()
 
   try {
+    const auth = await checkInternalAuth(request, { requireWorkflowId: false })
+    if (!auth.success || !auth.userId) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+
     logger.info(`[${requestId}] Provider API request started`, {
       timestamp: new Date().toISOString(),
       userAgent: request.headers.get('User-Agent'),
@@ -84,6 +91,13 @@ export async function POST(request: NextRequest) {
       reasoningEffort,
       verbosity,
     })
+
+    if (workspaceId) {
+      const workspaceAccess = await checkWorkspaceAccess(workspaceId, auth.userId)
+      if (!workspaceAccess.hasAccess) {
+        return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+      }
+    }
 
     let finalApiKey: string | undefined = apiKey
     try {
@@ -346,15 +360,20 @@ function sanitizeObject(obj: any): any {
 async function resolveVertexCredential(requestId: string, credentialId: string): Promise<string> {
   logger.info(`[${requestId}] Resolving Vertex AI credential: ${credentialId}`)
 
+  const resolved = await resolveOAuthAccountId(credentialId)
+  if (!resolved) {
+    throw new Error(`Vertex AI credential not found: ${credentialId}`)
+  }
+
   const credential = await db.query.account.findFirst({
-    where: eq(account.id, credentialId),
+    where: eq(account.id, resolved.accountId),
   })
 
   if (!credential) {
     throw new Error(`Vertex AI credential not found: ${credentialId}`)
   }
 
-  const { accessToken } = await refreshTokenIfNeeded(requestId, credential, credentialId)
+  const { accessToken } = await refreshTokenIfNeeded(requestId, credential, resolved.accountId)
 
   if (!accessToken) {
     throw new Error('Failed to get Vertex AI access token')

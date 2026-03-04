@@ -7,10 +7,10 @@ import Image from 'next/image'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { GithubIcon } from '@/components/icons'
-import { useBrandConfig } from '@/lib/branding/branding'
 import { isHosted } from '@/lib/core/config/feature-flags'
 import { soehne } from '@/app/_styles/fonts/soehne/soehne'
 import { getFormattedGitHubStars } from '@/app/(landing)/actions/github'
+import { useBrandConfig } from '@/ee/whitelabeling'
 import { useBrandedButtonClass } from '@/hooks/use-branded-button-class'
 
 const logger = createLogger('nav')
@@ -21,7 +21,7 @@ interface NavProps {
 }
 
 export default function Nav({ hideAuthButtons = false, variant = 'landing' }: NavProps = {}) {
-  const [githubStars, setGithubStars] = useState('25.8k')
+  const [githubStars, setGithubStars] = useState('26.1k')
   const [isHovered, setIsHovered] = useState(false)
   const [isLoginHovered, setIsLoginHovered] = useState(false)
   const router = useRouter()

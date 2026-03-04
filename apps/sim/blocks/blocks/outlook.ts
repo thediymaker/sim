@@ -1,6 +1,7 @@
 import { OutlookIcon } from '@/components/icons'
 import type { BlockConfig } from '@/blocks/types'
 import { AuthMode } from '@/blocks/types'
+import { normalizeFileInput } from '@/blocks/utils'
 import type { OutlookResponse } from '@/tools/outlook/types'
 import { getTrigger } from '@/triggers'
 
@@ -38,6 +39,8 @@ export const OutlookBlock: BlockConfig<OutlookResponse> = {
       id: 'credential',
       title: 'Microsoft Account',
       type: 'oauth-input',
+      canonicalParamId: 'oauthCredential',
+      mode: 'basic',
       serviceId: 'outlook',
       requiredScopes: [
         'Mail.ReadWrite',
@@ -50,6 +53,15 @@ export const OutlookBlock: BlockConfig<OutlookResponse> = {
         'email',
       ],
       placeholder: 'Select Microsoft account',
+      required: true,
+    },
+    {
+      id: 'manualCredential',
+      title: 'Microsoft Account',
+      type: 'short-input',
+      canonicalParamId: 'oauthCredential',
+      mode: 'advanced',
+      placeholder: 'Enter credential ID',
       required: true,
     },
     {
@@ -121,7 +133,7 @@ export const OutlookBlock: BlockConfig<OutlookResponse> = {
     },
     // Variable reference (advanced mode)
     {
-      id: 'attachments',
+      id: 'attachmentReference',
       title: 'Attachments',
       type: 'short-input',
       canonicalParamId: 'attachments',
@@ -170,11 +182,12 @@ export const OutlookBlock: BlockConfig<OutlookResponse> = {
     },
     // Read Email Fields - Add folder selector (basic mode)
     {
-      id: 'folder',
+      id: 'folderSelector',
       title: 'Folder',
       type: 'folder-selector',
       canonicalParamId: 'folder',
       serviceId: 'outlook',
+      selectorKey: 'outlook.folders',
       requiredScopes: ['Mail.ReadWrite', 'Mail.ReadBasic', 'Mail.Read'],
       placeholder: 'Select Outlook folder',
       dependsOn: ['credential'],
@@ -220,6 +233,7 @@ export const OutlookBlock: BlockConfig<OutlookResponse> = {
       type: 'folder-selector',
       canonicalParamId: 'destinationId',
       serviceId: 'outlook',
+      selectorKey: 'outlook.folders',
       requiredScopes: ['Mail.ReadWrite', 'Mail.ReadBasic', 'Mail.Read'],
       placeholder: 'Select destination folder',
       dependsOn: ['credential'],
@@ -266,6 +280,7 @@ export const OutlookBlock: BlockConfig<OutlookResponse> = {
       type: 'folder-selector',
       canonicalParamId: 'copyDestinationId',
       serviceId: 'outlook',
+      selectorKey: 'outlook.folders',
       requiredScopes: ['Mail.ReadWrite', 'Mail.ReadBasic', 'Mail.Read'],
       placeholder: 'Select destination folder',
       dependsOn: ['credential'],
@@ -325,21 +340,25 @@ export const OutlookBlock: BlockConfig<OutlookResponse> = {
       },
       params: (params) => {
         const {
-          credential,
+          oauthCredential,
           folder,
-          manualFolder,
-          destinationFolder,
-          manualDestinationFolder,
+          destinationId,
+          copyDestinationId,
+          attachments,
           moveMessageId,
           actionMessageId,
           copyMessageId,
-          copyDestinationFolder,
-          manualCopyDestinationFolder,
           ...rest
         } = params
 
-        // Handle both selector and manual folder input
-        const effectiveFolder = (folder || manualFolder || '').trim()
+        // folder is already the canonical param - use it directly
+        const effectiveFolder = folder ? String(folder).trim() : ''
+
+        // Normalize file attachments from the canonical attachments param
+        const normalizedAttachments = normalizeFileInput(attachments)
+        if (normalizedAttachments) {
+          rest.attachments = normalizedAttachments
+        }
 
         if (rest.operation === 'read_outlook') {
           rest.folder = effectiveFolder || 'INBOX'
@@ -350,8 +369,10 @@ export const OutlookBlock: BlockConfig<OutlookResponse> = {
           if (moveMessageId) {
             rest.messageId = moveMessageId
           }
-          if (!rest.destinationId) {
-            rest.destinationId = (destinationFolder || manualDestinationFolder || '').trim()
+          // destinationId is already the canonical param
+          const effectiveDestinationId = destinationId ? String(destinationId).trim() : ''
+          if (effectiveDestinationId) {
+            rest.destinationId = effectiveDestinationId
           }
         }
 
@@ -367,54 +388,48 @@ export const OutlookBlock: BlockConfig<OutlookResponse> = {
           if (copyMessageId) {
             rest.messageId = copyMessageId
           }
-          // Handle copyDestinationId (from UI canonical param) or destinationId (from trigger)
-          if (rest.copyDestinationId) {
-            rest.destinationId = rest.copyDestinationId
-            rest.copyDestinationId = undefined
-          } else if (!rest.destinationId) {
-            rest.destinationId = (copyDestinationFolder || manualCopyDestinationFolder || '').trim()
+          // copyDestinationId is the canonical param - map it to destinationId for the tool
+          const effectiveCopyDestinationId = copyDestinationId
+            ? String(copyDestinationId).trim()
+            : ''
+          if (effectiveCopyDestinationId) {
+            rest.destinationId = effectiveCopyDestinationId
           }
         }
 
         return {
           ...rest,
-          credential,
+          oauthCredential,
         }
       },
     },
   },
   inputs: {
     operation: { type: 'string', description: 'Operation to perform' },
-    credential: { type: 'string', description: 'Outlook access token' },
+    oauthCredential: { type: 'string', description: 'Outlook access token' },
     // Send operation inputs
     to: { type: 'string', description: 'Recipient email address' },
     subject: { type: 'string', description: 'Email subject' },
     body: { type: 'string', description: 'Email content' },
     contentType: { type: 'string', description: 'Content type (Text or HTML)' },
-    attachmentFiles: { type: 'json', description: 'Files to attach (UI upload)' },
-    attachments: { type: 'array', description: 'Files to attach (UserFile array)' },
+    attachments: { type: 'array', description: 'Files to attach (canonical param)' },
     // Forward operation inputs
     messageId: { type: 'string', description: 'Message ID to forward' },
     comment: { type: 'string', description: 'Optional comment for forwarding' },
     // Read operation inputs
-    folder: { type: 'string', description: 'Email folder' },
-    manualFolder: { type: 'string', description: 'Manual folder name' },
+    folder: { type: 'string', description: 'Email folder (canonical param)' },
     maxResults: { type: 'number', description: 'Maximum emails' },
     includeAttachments: { type: 'boolean', description: 'Include email attachments' },
     // Move operation inputs
     moveMessageId: { type: 'string', description: 'Message ID to move' },
-    destinationFolder: { type: 'string', description: 'Destination folder ID' },
-    manualDestinationFolder: { type: 'string', description: 'Manual destination folder ID' },
-    destinationId: { type: 'string', description: 'Destination folder ID for move' },
+    destinationId: { type: 'string', description: 'Destination folder ID (canonical param)' },
     // Action operation inputs
     actionMessageId: { type: 'string', description: 'Message ID for actions' },
     copyMessageId: { type: 'string', description: 'Message ID to copy' },
-    copyDestinationFolder: { type: 'string', description: 'Copy destination folder ID' },
-    manualCopyDestinationFolder: {
+    copyDestinationId: {
       type: 'string',
-      description: 'Manual copy destination folder ID',
+      description: 'Destination folder ID for copy (canonical param)',
     },
-    copyDestinationId: { type: 'string', description: 'Destination folder ID for copy' },
   },
   outputs: {
     // Common outputs
@@ -440,7 +455,7 @@ export const OutlookBlock: BlockConfig<OutlookResponse> = {
     sentDateTime: { type: 'string', description: 'Email sent timestamp' },
     hasAttachments: { type: 'boolean', description: 'Whether email has attachments' },
     attachments: {
-      type: 'json',
+      type: 'file[]',
       description: 'Email attachments (if includeAttachments is enabled)',
     },
     isRead: { type: 'boolean', description: 'Whether email is read' },

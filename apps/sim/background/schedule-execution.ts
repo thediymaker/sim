@@ -4,8 +4,7 @@ import { task } from '@trigger.dev/sdk'
 import { Cron } from 'croner'
 import { eq } from 'drizzle-orm'
 import { v4 as uuidv4 } from 'uuid'
-import type { ZodRecord, ZodString } from 'zod'
-import { getPersonalAndWorkspaceEnv } from '@/lib/environment/utils'
+import { createTimeoutAbortController, getTimeoutErrorMessage } from '@/lib/core/execution-limits'
 import { preprocessExecution } from '@/lib/execution/preprocessing'
 import { LoggingSession } from '@/lib/logs/execution/logging-session'
 import { buildTraceSpans } from '@/lib/logs/execution/trace-spans/trace-spans'
@@ -23,7 +22,7 @@ import {
 } from '@/lib/workflows/schedules/utils'
 import { ExecutionSnapshot } from '@/executor/execution/snapshot'
 import type { ExecutionMetadata } from '@/executor/execution/types'
-import type { ExecutionResult } from '@/executor/types'
+import { hasExecutionResult } from '@/executor/utils/errors'
 import { MAX_CONSECUTIVE_FAILURES } from '@/triggers/constants'
 
 const logger = createLogger('TriggerScheduleExecution')
@@ -41,15 +40,10 @@ async function applyScheduleUpdate(
   scheduleId: string,
   updates: WorkflowScheduleUpdate,
   requestId: string,
-  context: string,
-  successLog?: string
+  context: string
 ) {
   try {
     await db.update(workflowSchedule).set(updates).where(eq(workflowSchedule.id, scheduleId))
-
-    if (successLog) {
-      logger.debug(`[${requestId}] ${successLog}`)
-    }
   } catch (error) {
     logger.error(`[${requestId}] ${context}`, error)
   }
@@ -122,7 +116,7 @@ async function runWorkflowExecution({
   loggingSession,
   requestId,
   executionId,
-  EnvVarsSchema,
+  asyncTimeout,
 }: {
   payload: ScheduleExecutionPayload
   workflowRecord: WorkflowRecord
@@ -130,11 +124,13 @@ async function runWorkflowExecution({
   loggingSession: LoggingSession
   requestId: string
   executionId: string
-  EnvVarsSchema: ZodRecord<ZodString, ZodString>
+  asyncTimeout?: number
 }): Promise<RunWorkflowResult> {
   try {
-    logger.debug(`[${requestId}] Loading deployed workflow ${payload.workflowId}`)
-    const deployedData = await loadDeployedWorkflowState(payload.workflowId)
+    const deployedData = await loadDeployedWorkflowState(
+      payload.workflowId,
+      workflowRecord.workspaceId ?? undefined
+    )
 
     const blocks = deployedData.blocks
     const { deploymentVersionId } = deployedData
@@ -156,30 +152,11 @@ async function runWorkflowExecution({
       throw new Error(`Workflow ${payload.workflowId} has no associated workspace`)
     }
 
-    const personalEnvUserId = workflowRecord.userId
-
-    const { personalEncrypted, workspaceEncrypted } = await getPersonalAndWorkspaceEnv(
-      personalEnvUserId,
-      workspaceId
-    )
-
-    const variables = EnvVarsSchema.parse({
-      ...personalEncrypted,
-      ...workspaceEncrypted,
-    })
-
     const input = {
       _context: {
         workflowId: payload.workflowId,
       },
     }
-
-    await loggingSession.safeStart({
-      userId: actorUserId,
-      workspaceId,
-      variables: variables || {},
-      deploymentVersionId,
-    })
 
     const metadata: ExecutionMetadata = {
       requestId,
@@ -204,15 +181,33 @@ async function runWorkflowExecution({
       []
     )
 
-    const executionResult = await executeWorkflowCore({
-      snapshot,
-      callbacks: {},
-      loggingSession,
-      includeFileBase64: true,
-      base64MaxBytes: undefined,
-    })
+    const timeoutController = createTimeoutAbortController(asyncTimeout)
 
-    if (executionResult.status === 'paused') {
+    let executionResult
+    try {
+      executionResult = await executeWorkflowCore({
+        snapshot,
+        callbacks: {},
+        loggingSession,
+        includeFileBase64: true,
+        base64MaxBytes: undefined,
+        abortSignal: timeoutController.signal,
+      })
+    } finally {
+      timeoutController.cleanup()
+    }
+
+    if (
+      executionResult.status === 'cancelled' &&
+      timeoutController.isTimedOut() &&
+      timeoutController.timeoutMs
+    ) {
+      const timeoutErrorMessage = getTimeoutErrorMessage(null, timeoutController.timeoutMs)
+      logger.info(`[${requestId}] Scheduled workflow execution timed out`, {
+        timeoutMs: timeoutController.timeoutMs,
+      })
+      await loggingSession.markAsFailed(timeoutErrorMessage)
+    } else if (executionResult.status === 'paused') {
       if (!executionResult.snapshotSeed) {
         logger.error(`[${requestId}] Missing snapshot seed for paused execution`, {
           executionId,
@@ -254,8 +249,7 @@ async function runWorkflowExecution({
   } catch (error: unknown) {
     logger.error(`[${requestId}] Early failure in scheduled workflow ${payload.workflowId}`, error)
 
-    const errorWithResult = error as { executionResult?: ExecutionResult }
-    const executionResult = errorWithResult?.executionResult
+    const executionResult = hasExecutionResult(error) ? error.executionResult : undefined
     const { traceSpans } = executionResult ? buildTraceSpans(executionResult) : { traceSpans: [] }
 
     await loggingSession.safeCompleteWithError({
@@ -279,7 +273,6 @@ export type ScheduleExecutionPayload = {
   failedCount?: number
   now: string
   scheduledFor?: string
-  preflighted?: boolean
 }
 
 function calculateNextRunTime(
@@ -319,9 +312,6 @@ export async function executeScheduleJob(payload: ScheduleExecutionPayload) {
     executionId,
   })
 
-  const zod = await import('zod')
-  const EnvVarsSchema = zod.z.record(zod.z.string())
-
   try {
     const loggingSession = new LoggingSession(
       payload.workflowId,
@@ -339,7 +329,6 @@ export async function executeScheduleJob(payload: ScheduleExecutionPayload) {
       checkRateLimit: true,
       checkDeployment: true,
       loggingSession,
-      preflightEnvVars: !payload.preflighted,
     })
 
     if (!preprocessResult.success) {
@@ -359,8 +348,7 @@ export async function executeScheduleJob(payload: ScheduleExecutionPayload) {
               status: 'disabled',
             },
             requestId,
-            `Failed to disable schedule ${payload.scheduleId} after authentication error`,
-            `Disabled schedule ${payload.scheduleId} due to authentication failure (401)`
+            `Failed to disable schedule ${payload.scheduleId} after authentication error`
           )
           return
         }
@@ -378,8 +366,7 @@ export async function executeScheduleJob(payload: ScheduleExecutionPayload) {
               status: 'disabled',
             },
             requestId,
-            `Failed to disable schedule ${payload.scheduleId} after authorization error`,
-            `Disabled schedule ${payload.scheduleId} due to authorization failure (403)`
+            `Failed to disable schedule ${payload.scheduleId} after authorization error`
           )
           return
         }
@@ -394,8 +381,7 @@ export async function executeScheduleJob(payload: ScheduleExecutionPayload) {
               status: 'disabled',
             },
             requestId,
-            `Failed to disable schedule ${payload.scheduleId} after missing workflow`,
-            `Disabled schedule ${payload.scheduleId} because the workflow no longer exists`
+            `Failed to disable schedule ${payload.scheduleId} after missing workflow`
           )
           return
         }
@@ -412,8 +398,7 @@ export async function executeScheduleJob(payload: ScheduleExecutionPayload) {
               nextRunAt: nextRetryAt,
             },
             requestId,
-            `Error updating schedule ${payload.scheduleId} for rate limit`,
-            `Updated next retry time for schedule ${payload.scheduleId} due to rate limit`
+            `Error updating schedule ${payload.scheduleId} for rate limit`
           )
           return
         }
@@ -429,8 +414,7 @@ export async function executeScheduleJob(payload: ScheduleExecutionPayload) {
                 nextRunAt,
               },
               requestId,
-              `Error updating schedule ${payload.scheduleId} after usage limit check`,
-              `Scheduled next run for ${payload.scheduleId} after usage limit`
+              `Error updating schedule ${payload.scheduleId} after usage limit check`
             )
           }
           return
@@ -458,8 +442,7 @@ export async function executeScheduleJob(payload: ScheduleExecutionPayload) {
               status: shouldDisable ? 'disabled' : 'active',
             },
             requestId,
-            `Error updating schedule ${payload.scheduleId} after preprocessing failure`,
-            `Updated schedule ${payload.scheduleId} after preprocessing failure`
+            `Error updating schedule ${payload.scheduleId} after preprocessing failure`
           )
           return
         }
@@ -482,7 +465,7 @@ export async function executeScheduleJob(payload: ScheduleExecutionPayload) {
         loggingSession,
         requestId,
         executionId,
-        EnvVarsSchema,
+        asyncTimeout: preprocessResult.executionTimeout?.async,
       })
 
       if (executionResult.status === 'skip') {
@@ -511,8 +494,7 @@ export async function executeScheduleJob(payload: ScheduleExecutionPayload) {
             lastQueuedAt: null,
           },
           requestId,
-          `Error updating schedule ${payload.scheduleId} after success`,
-          `Updated next run time for workflow ${payload.workflowId} to ${nextRunAt.toISOString()}`
+          `Error updating schedule ${payload.scheduleId} after success`
         )
         return
       }
@@ -539,8 +521,7 @@ export async function executeScheduleJob(payload: ScheduleExecutionPayload) {
           status: shouldDisable ? 'disabled' : 'active',
         },
         requestId,
-        `Error updating schedule ${payload.scheduleId} after failure`,
-        `Updated schedule ${payload.scheduleId} after failure`
+        `Error updating schedule ${payload.scheduleId} after failure`
       )
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : String(error)
@@ -558,8 +539,7 @@ export async function executeScheduleJob(payload: ScheduleExecutionPayload) {
             nextRunAt: nextRetryAt,
           },
           requestId,
-          `Error updating schedule ${payload.scheduleId} for service overload`,
-          `Updated schedule ${payload.scheduleId} retry time due to service overload`
+          `Error updating schedule ${payload.scheduleId} for service overload`
         )
         return
       }
@@ -586,8 +566,7 @@ export async function executeScheduleJob(payload: ScheduleExecutionPayload) {
           status: shouldDisable ? 'disabled' : 'active',
         },
         requestId,
-        `Error updating schedule ${payload.scheduleId} after execution error`,
-        `Updated schedule ${payload.scheduleId} after execution error`
+        `Error updating schedule ${payload.scheduleId} after execution error`
       )
     }
   } catch (error: unknown) {
@@ -597,6 +576,7 @@ export async function executeScheduleJob(payload: ScheduleExecutionPayload) {
 
 export const scheduleExecution = task({
   id: 'schedule-execution',
+  machine: 'medium-1x',
   retry: {
     maxAttempts: 1,
   },

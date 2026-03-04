@@ -1,3 +1,4 @@
+import { setupGlobalFetchMock } from '@sim/testing'
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from 'vitest'
 import { getAllBlocks } from '@/blocks'
 import { BlockType, isMcpTool } from '@/executor/constants'
@@ -16,6 +17,7 @@ vi.mock('@/lib/core/config/feature-flags', () => ({
   isDev: true,
   isTest: false,
   getCostMultiplier: vi.fn().mockReturnValue(1),
+  getAllowedIntegrationsFromEnv: vi.fn().mockReturnValue(null),
   isEmailVerificationEnabled: false,
   isBillingEnabled: false,
   isOrganizationsEnabled: false,
@@ -61,6 +63,30 @@ vi.mock('@/providers', () => ({
   }),
 }))
 
+vi.mock('@/executor/utils/http', () => ({
+  buildAuthHeaders: vi.fn().mockResolvedValue({ 'Content-Type': 'application/json' }),
+  buildAPIUrl: vi.fn((path: string, params?: Record<string, string>) => {
+    const url = new URL(path, 'http://localhost:3000')
+    if (params) {
+      for (const [key, value] of Object.entries(params)) {
+        if (value !== undefined && value !== null) {
+          url.searchParams.set(key, value)
+        }
+      }
+    }
+    return url
+  }),
+  extractAPIErrorMessage: vi.fn(async (response: Response) => {
+    const defaultMessage = `API request failed with status ${response.status}`
+    try {
+      const errorData = await response.json()
+      return errorData.error || defaultMessage
+    } catch {
+      return defaultMessage
+    }
+  }),
+}))
+
 vi.mock('@sim/db', () => ({
   db: {
     select: vi.fn().mockReturnValue({
@@ -84,7 +110,7 @@ vi.mock('@sim/db/schema', () => ({
   },
 }))
 
-global.fetch = Object.assign(vi.fn(), { preconnect: vi.fn() }) as typeof fetch
+setupGlobalFetchMock()
 
 const mockGetAllBlocks = getAllBlocks as Mock
 const mockExecuteTool = executeTool as Mock
@@ -97,7 +123,6 @@ describe('AgentBlockHandler', () => {
   let handler: AgentBlockHandler
   let mockBlock: SerializedBlock
   let mockContext: ExecutionContext
-  let originalPromiseAll: any
 
   beforeEach(() => {
     handler = new AgentBlockHandler()
@@ -108,8 +133,6 @@ describe('AgentBlockHandler', () => {
       writable: true,
       configurable: true,
     })
-
-    originalPromiseAll = Promise.all
 
     mockBlock = {
       id: 'test-agent-block',
@@ -144,25 +167,22 @@ describe('AgentBlockHandler', () => {
     }
     mockGetProviderFromModel.mockReturnValue('mock-provider')
 
-    mockFetch.mockImplementation(() => {
+    mockExecuteProviderRequest.mockResolvedValue({
+      content: 'Mocked response content',
+      model: 'mock-model',
+      tokens: { input: 10, output: 20, total: 30 },
+      toolCalls: [],
+      cost: 0.001,
+      timing: { total: 100 },
+    })
+
+    mockFetch.mockImplementation((url: string) => {
       return Promise.resolve({
         ok: true,
         headers: {
-          get: (name: string) => {
-            if (name === 'Content-Type') return 'application/json'
-            if (name === 'X-Execution-Data') return null
-            return null
-          },
+          get: () => null,
         },
-        json: () =>
-          Promise.resolve({
-            content: 'Mocked response content',
-            model: 'mock-model',
-            tokens: { input: 10, output: 20, total: 30 },
-            toolCalls: [],
-            cost: 0.001,
-            timing: { total: 100 },
-          }),
+        json: () => Promise.resolve({}),
       })
     })
 
@@ -186,8 +206,6 @@ describe('AgentBlockHandler', () => {
   })
 
   afterEach(() => {
-    Promise.all = originalPromiseAll
-
     try {
       Object.defineProperty(global, 'window', {
         value: undefined,
@@ -244,55 +262,11 @@ describe('AgentBlockHandler', () => {
       const result = await handler.execute(mockContext, mockBlock, inputs)
 
       expect(mockGetProviderFromModel).toHaveBeenCalledWith('gpt-4o')
-      expect(mockFetch).toHaveBeenCalledWith(expect.any(String), expect.any(Object))
+      expect(mockExecuteProviderRequest).toHaveBeenCalled()
       expect(result).toEqual(expectedOutput)
     })
 
-    it('should preserve executeFunction for custom tools with different usageControl settings', async () => {
-      let capturedTools: any[] = []
-
-      Promise.all = vi.fn().mockImplementation((promises: Promise<any>[]) => {
-        const result = originalPromiseAll.call(Promise, promises)
-
-        result.then((tools: any[]) => {
-          if (tools?.length) {
-            capturedTools = tools.filter((t) => t !== null)
-          }
-        })
-
-        return result
-      })
-
-      mockFetch.mockImplementationOnce(() => {
-        return Promise.resolve({
-          ok: true,
-          headers: {
-            get: (name: string) => {
-              if (name === 'Content-Type') return 'application/json'
-              if (name === 'X-Execution-Data') return null
-              return null
-            },
-          },
-          json: () =>
-            Promise.resolve({
-              content: 'Using tools to respond',
-              model: 'mock-model',
-              tokens: { input: 10, output: 20, total: 30 },
-              toolCalls: [
-                {
-                  name: 'auto_tool',
-                  arguments: { input: 'test input for auto tool' },
-                },
-                {
-                  name: 'force_tool',
-                  arguments: { input: 'test input for force tool' },
-                },
-              ],
-              timing: { total: 100 },
-            }),
-        })
-      })
-
+    it('should preserve usageControl for custom tools and filter out "none"', async () => {
       const inputs = {
         model: 'gpt-4o',
         userPrompt: 'Test custom tools with different usageControl settings',
@@ -362,13 +336,14 @@ describe('AgentBlockHandler', () => {
 
       await handler.execute(mockContext, mockBlock, inputs)
 
-      expect(Promise.all).toHaveBeenCalled()
+      const providerCall = mockExecuteProviderRequest.mock.calls[0]
+      const tools = providerCall[1].tools
 
-      expect(capturedTools.length).toBe(2)
+      expect(tools.length).toBe(2)
 
-      const autoTool = capturedTools.find((t) => t.name === 'auto_tool')
-      const forceTool = capturedTools.find((t) => t.name === 'force_tool')
-      const noneTool = capturedTools.find((t) => t.name === 'none_tool')
+      const autoTool = tools.find((t: any) => t.name === 'auto_tool')
+      const forceTool = tools.find((t: any) => t.name === 'force_tool')
+      const noneTool = tools.find((t: any) => t.name === 'none_tool')
 
       expect(autoTool).toBeDefined()
       expect(forceTool).toBeDefined()
@@ -376,37 +351,6 @@ describe('AgentBlockHandler', () => {
 
       expect(autoTool.usageControl).toBe('auto')
       expect(forceTool.usageControl).toBe('force')
-
-      expect(typeof autoTool.executeFunction).toBe('function')
-      expect(typeof forceTool.executeFunction).toBe('function')
-
-      await autoTool.executeFunction({ input: 'test input' })
-      expect(mockExecuteTool).toHaveBeenCalledWith(
-        'function_execute',
-        expect.objectContaining({
-          code: 'return { result: "auto tool executed", input }',
-          input: 'test input',
-        }),
-        false, // skipPostProcess
-        expect.any(Object) // execution context
-      )
-
-      await forceTool.executeFunction({ input: 'another test' })
-      expect(mockExecuteTool).toHaveBeenNthCalledWith(
-        2, // Check the 2nd call
-        'function_execute',
-        expect.objectContaining({
-          code: 'return { result: "force tool executed", input }',
-          input: 'another test',
-        }),
-        false, // skipPostProcess
-        expect.any(Object) // execution context
-      )
-
-      const fetchCall = mockFetch.mock.calls[0]
-      const requestBody = JSON.parse(fetchCall[1].body)
-
-      expect(requestBody.tools.length).toBe(2)
     })
 
     it('should filter out tools with usageControl set to "none"', async () => {
@@ -443,8 +387,8 @@ describe('AgentBlockHandler', () => {
 
       await handler.execute(mockContext, mockBlock, inputs)
 
-      const fetchCall = mockFetch.mock.calls[0]
-      const requestBody = JSON.parse(fetchCall[1].body)
+      const providerCall = mockExecuteProviderRequest.mock.calls[0]
+      const requestBody = providerCall[1]
 
       expect(requestBody.tools.length).toBe(2)
 
@@ -488,8 +432,8 @@ describe('AgentBlockHandler', () => {
 
       await handler.execute(mockContext, mockBlock, inputs)
 
-      const fetchCall = mockFetch.mock.calls[0]
-      const requestBody = JSON.parse(fetchCall[1].body)
+      const providerCall = mockExecuteProviderRequest.mock.calls[0]
+      const requestBody = providerCall[1]
 
       expect(requestBody.tools[0].usageControl).toBe('auto')
       expect(requestBody.tools[1].usageControl).toBe('force')
@@ -553,8 +497,8 @@ describe('AgentBlockHandler', () => {
 
       await handler.execute(mockContext, mockBlock, inputs)
 
-      const fetchCall = mockFetch.mock.calls[0]
-      const requestBody = JSON.parse(fetchCall[1].body)
+      const providerCall = mockExecuteProviderRequest.mock.calls[0]
+      const requestBody = providerCall[1]
 
       expect(requestBody.tools.length).toBe(2)
 
@@ -583,7 +527,7 @@ describe('AgentBlockHandler', () => {
 
       await handler.execute(mockContext, mockBlock, inputs)
 
-      expect(mockFetch).toHaveBeenCalledWith(expect.any(String), expect.any(Object))
+      expect(mockExecuteProviderRequest).toHaveBeenCalled()
     })
 
     it('should execute with standard block tools', async () => {
@@ -625,7 +569,7 @@ describe('AgentBlockHandler', () => {
         inputs.tools[0],
         expect.objectContaining({ selectedOperation: 'analyze' })
       )
-      expect(mockFetch).toHaveBeenCalledWith(expect.any(String), expect.any(Object))
+      expect(mockExecuteProviderRequest).toHaveBeenCalled()
       expect(result).toEqual(expectedOutput)
     })
 
@@ -676,30 +620,17 @@ describe('AgentBlockHandler', () => {
 
       await handler.execute(mockContext, mockBlock, inputs)
 
-      expect(mockFetch).toHaveBeenCalledWith(expect.any(String), expect.any(Object))
+      expect(mockExecuteProviderRequest).toHaveBeenCalled()
     })
 
     it('should handle responseFormat with valid JSON', async () => {
-      mockFetch.mockImplementationOnce(() => {
-        return Promise.resolve({
-          ok: true,
-          headers: {
-            get: (name: string) => {
-              if (name === 'Content-Type') return 'application/json'
-              if (name === 'X-Execution-Data') return null
-              return null
-            },
-          },
-          json: () =>
-            Promise.resolve({
-              content: '{"result": "Success", "score": 0.95}',
-              model: 'mock-model',
-              tokens: { input: 10, output: 20, total: 30 },
-              timing: { total: 100 },
-              toolCalls: [],
-              cost: undefined,
-            }),
-        })
+      mockExecuteProviderRequest.mockResolvedValueOnce({
+        content: '{"result": "Success", "score": 0.95}',
+        model: 'mock-model',
+        tokens: { input: 10, output: 20, total: 30 },
+        timing: { total: 100 },
+        toolCalls: [],
+        cost: undefined,
       })
 
       const inputs = {
@@ -723,24 +654,11 @@ describe('AgentBlockHandler', () => {
     })
 
     it('should handle responseFormat when it is an empty string', async () => {
-      mockFetch.mockImplementationOnce(() => {
-        return Promise.resolve({
-          ok: true,
-          headers: {
-            get: (name: string) => {
-              if (name === 'Content-Type') return 'application/json'
-              if (name === 'X-Execution-Data') return null
-              return null
-            },
-          },
-          json: () =>
-            Promise.resolve({
-              content: 'Regular text response',
-              model: 'mock-model',
-              tokens: { input: 10, output: 20, total: 30 },
-              timing: { total: 100 },
-            }),
-        })
+      mockExecuteProviderRequest.mockResolvedValueOnce({
+        content: 'Regular text response',
+        model: 'mock-model',
+        tokens: { input: 10, output: 20, total: 30 },
+        timing: { total: 100 },
       })
 
       const inputs = {
@@ -763,26 +681,13 @@ describe('AgentBlockHandler', () => {
     })
 
     it('should handle invalid JSON in responseFormat gracefully', async () => {
-      mockFetch.mockImplementationOnce(() => {
-        return Promise.resolve({
-          ok: true,
-          headers: {
-            get: (name: string) => {
-              if (name === 'Content-Type') return 'application/json'
-              if (name === 'X-Execution-Data') return null
-              return null
-            },
-          },
-          json: () =>
-            Promise.resolve({
-              content: 'Regular text response',
-              model: 'mock-model',
-              tokens: { input: 10, output: 20, total: 30 },
-              timing: { total: 100 },
-              toolCalls: [],
-              cost: undefined,
-            }),
-        })
+      mockExecuteProviderRequest.mockResolvedValueOnce({
+        content: 'Regular text response',
+        model: 'mock-model',
+        tokens: { input: 10, output: 20, total: 30 },
+        timing: { total: 100 },
+        toolCalls: [],
+        cost: undefined,
       })
 
       const inputs = {
@@ -806,26 +711,13 @@ describe('AgentBlockHandler', () => {
     })
 
     it('should handle variable references in responseFormat gracefully', async () => {
-      mockFetch.mockImplementationOnce(() => {
-        return Promise.resolve({
-          ok: true,
-          headers: {
-            get: (name: string) => {
-              if (name === 'Content-Type') return 'application/json'
-              if (name === 'X-Execution-Data') return null
-              return null
-            },
-          },
-          json: () =>
-            Promise.resolve({
-              content: 'Regular text response',
-              model: 'mock-model',
-              tokens: { input: 10, output: 20, total: 30 },
-              timing: { total: 100 },
-              toolCalls: [],
-              cost: undefined,
-            }),
-        })
+      mockExecuteProviderRequest.mockResolvedValueOnce({
+        content: 'Regular text response',
+        model: 'mock-model',
+        tokens: { input: 10, output: 20, total: 30 },
+        timing: { total: 100 },
+        toolCalls: [],
+        cost: undefined,
       })
 
       const inputs = {
@@ -856,7 +748,7 @@ describe('AgentBlockHandler', () => {
       }
 
       mockGetProviderFromModel.mockReturnValue('openai')
-      mockFetch.mockRejectedValue(new Error('Provider API Error'))
+      mockExecuteProviderRequest.mockRejectedValueOnce(new Error('Provider API Error'))
 
       await expect(handler.execute(mockContext, mockBlock, inputs)).rejects.toThrow(
         'Provider API Error'
@@ -870,30 +762,17 @@ describe('AgentBlockHandler', () => {
         },
       })
 
-      mockFetch.mockImplementationOnce(() => {
-        return Promise.resolve({
-          ok: true,
-          headers: {
-            get: (name: string) => {
-              if (name === 'Content-Type') return 'application/json'
-              if (name === 'X-Execution-Data') return null
-              return null
-            },
+      mockExecuteProviderRequest.mockResolvedValueOnce({
+        stream: mockStreamBody,
+        execution: {
+          success: true,
+          output: {},
+          logs: [],
+          metadata: {
+            duration: 0,
+            startTime: new Date().toISOString(),
           },
-          json: () =>
-            Promise.resolve({
-              stream: mockStreamBody,
-              execution: {
-                success: true,
-                output: {},
-                logs: [],
-                metadata: {
-                  duration: 0,
-                  startTime: new Date().toISOString(),
-                },
-              },
-            }),
-        })
+        },
       })
 
       const inputs = {
@@ -947,22 +826,9 @@ describe('AgentBlockHandler', () => {
         },
       }
 
-      mockFetch.mockImplementationOnce(() => {
-        return Promise.resolve({
-          ok: true,
-          headers: {
-            get: (name: string) => {
-              if (name === 'Content-Type') return 'application/json'
-              if (name === 'X-Execution-Data') return JSON.stringify(mockExecutionData)
-              return null
-            },
-          },
-          json: () =>
-            Promise.resolve({
-              stream: mockStreamBody,
-              execution: mockExecutionData,
-            }),
-        })
+      mockExecuteProviderRequest.mockResolvedValueOnce({
+        stream: mockStreamBody,
+        execution: mockExecutionData,
       })
 
       const inputs = {
@@ -996,30 +862,21 @@ describe('AgentBlockHandler', () => {
         },
       })
 
-      mockFetch.mockImplementationOnce(() => {
-        return Promise.resolve({
-          ok: true,
-          headers: {
-            get: (name: string) => (name === 'Content-Type' ? 'application/json' : null),
+      mockExecuteProviderRequest.mockResolvedValueOnce({
+        stream: {}, // Serialized stream placeholder
+        execution: {
+          success: true,
+          output: {
+            content: 'Test streaming content',
+            model: 'gpt-4o',
+            tokens: { input: 10, output: 5, total: 15 },
           },
-          json: () =>
-            Promise.resolve({
-              stream: {}, // Serialized stream placeholder
-              execution: {
-                success: true,
-                output: {
-                  content: 'Test streaming content',
-                  model: 'gpt-4o',
-                  tokens: { input: 10, output: 5, total: 15 },
-                },
-                logs: [],
-                metadata: {
-                  startTime: new Date().toISOString(),
-                  duration: 150,
-                },
-              },
-            }),
-        })
+          logs: [],
+          metadata: {
+            startTime: new Date().toISOString(),
+            duration: 150,
+          },
+        },
       })
 
       const inputs = {
@@ -1060,8 +917,8 @@ describe('AgentBlockHandler', () => {
 
       await handler.execute(mockContext, mockBlock, inputs)
 
-      const fetchCall = mockFetch.mock.calls[0]
-      const requestBody = JSON.parse(fetchCall[1].body)
+      const providerCall = mockExecuteProviderRequest.mock.calls[0]
+      const requestBody = providerCall[1]
 
       // Verify messages were built correctly
       expect(requestBody.messages).toBeDefined()
@@ -1110,8 +967,8 @@ describe('AgentBlockHandler', () => {
 
       await handler.execute(mockContext, mockBlock, inputs)
 
-      const fetchCall = mockFetch.mock.calls[0]
-      const requestBody = JSON.parse(fetchCall[1].body)
+      const providerCall = mockExecuteProviderRequest.mock.calls[0]
+      const requestBody = providerCall[1]
 
       // Verify messages were built correctly
       expect(requestBody.messages).toBeDefined()
@@ -1149,8 +1006,8 @@ describe('AgentBlockHandler', () => {
 
       await handler.execute(mockContext, mockBlock, inputs)
 
-      const fetchCall = mockFetch.mock.calls[0]
-      const requestBody = JSON.parse(fetchCall[1].body)
+      const providerCall = mockExecuteProviderRequest.mock.calls[0]
+      const requestBody = providerCall[1]
 
       // Verify messages were built correctly
       expect(requestBody.messages).toBeDefined()
@@ -1181,8 +1038,8 @@ describe('AgentBlockHandler', () => {
 
       await handler.execute(mockContext, mockBlock, inputs)
 
-      const fetchCall = mockFetch.mock.calls[0]
-      const requestBody = JSON.parse(fetchCall[1].body)
+      const providerCall = mockExecuteProviderRequest.mock.calls[0]
+      const requestBody = providerCall[1]
 
       // Verify messages were built correctly
       // Agent system (1) + legacy memories (3) + user from messages (1) = 5
@@ -1225,8 +1082,8 @@ describe('AgentBlockHandler', () => {
 
       await handler.execute(mockContext, mockBlock, inputs)
 
-      const fetchCall = mockFetch.mock.calls[0]
-      const requestBody = JSON.parse(fetchCall[1].body)
+      const providerCall = mockExecuteProviderRequest.mock.calls[0]
+      const requestBody = providerCall[1]
 
       // Verify messages were built correctly
       expect(requestBody.messages).toBeDefined()
@@ -1268,8 +1125,8 @@ describe('AgentBlockHandler', () => {
 
       await handler.execute(mockContext, mockBlock, inputs)
 
-      const fetchCall = mockFetch.mock.calls[0]
-      const requestBody = JSON.parse(fetchCall[1].body)
+      const providerCall = mockExecuteProviderRequest.mock.calls[0]
+      const requestBody = providerCall[1]
 
       // Verify messages were built correctly
       expect(requestBody.messages).toBeDefined()
@@ -1310,8 +1167,8 @@ describe('AgentBlockHandler', () => {
 
       await handler.execute(mockContext, mockBlock, inputs)
 
-      const fetchCall = mockFetch.mock.calls[0]
-      const requestBody = JSON.parse(fetchCall[1].body)
+      const providerCall = mockExecuteProviderRequest.mock.calls[0]
+      const requestBody = providerCall[1]
 
       // Verify user prompt content was extracted correctly
       expect(requestBody.messages).toBeDefined()
@@ -1337,15 +1194,14 @@ describe('AgentBlockHandler', () => {
 
       await handler.execute(mockContext, mockBlock, inputs)
 
-      expect(mockFetch).toHaveBeenCalledWith(expect.any(String), expect.any(Object))
+      expect(mockExecuteProviderRequest).toHaveBeenCalled()
 
-      const fetchCall = mockFetch.mock.calls[0]
-      const requestBody = JSON.parse(fetchCall[1].body)
+      const providerCall = mockExecuteProviderRequest.mock.calls[0]
+      const requestBody = providerCall[1]
 
-      // Check that Azure parameters are included in the request
       expect(requestBody.azureEndpoint).toBe('https://my-azure-resource.openai.azure.com')
       expect(requestBody.azureApiVersion).toBe('2024-07-01-preview')
-      expect(requestBody.provider).toBe('azure-openai')
+      expect(providerCall[0]).toBe('azure-openai')
       expect(requestBody.model).toBe('azure/gpt-4o')
       expect(requestBody.apiKey).toBe('test-azure-api-key')
     })
@@ -1365,15 +1221,14 @@ describe('AgentBlockHandler', () => {
 
       await handler.execute(mockContext, mockBlock, inputs)
 
-      expect(mockFetch).toHaveBeenCalledWith(expect.any(String), expect.any(Object))
+      expect(mockExecuteProviderRequest).toHaveBeenCalled()
 
-      const fetchCall = mockFetch.mock.calls[0]
-      const requestBody = JSON.parse(fetchCall[1].body)
+      const providerCall = mockExecuteProviderRequest.mock.calls[0]
+      const requestBody = providerCall[1]
 
-      // Check that GPT-5 parameters are included in the request
       expect(requestBody.reasoningEffort).toBe('minimal')
       expect(requestBody.verbosity).toBe('high')
-      expect(requestBody.provider).toBe('openai')
+      expect(providerCall[0]).toBe('openai')
       expect(requestBody.model).toBe('gpt-5')
       expect(requestBody.apiKey).toBe('test-api-key')
     })
@@ -1385,22 +1240,20 @@ describe('AgentBlockHandler', () => {
         userPrompt: 'Hello!',
         apiKey: 'test-api-key',
         temperature: 0.7,
-        // No reasoningEffort or verbosity provided
       }
 
       mockGetProviderFromModel.mockReturnValue('openai')
 
       await handler.execute(mockContext, mockBlock, inputs)
 
-      expect(mockFetch).toHaveBeenCalledWith(expect.any(String), expect.any(Object))
+      expect(mockExecuteProviderRequest).toHaveBeenCalled()
 
-      const fetchCall = mockFetch.mock.calls[0]
-      const requestBody = JSON.parse(fetchCall[1].body)
+      const providerCall = mockExecuteProviderRequest.mock.calls[0]
+      const requestBody = providerCall[1]
 
-      // Check that GPT-5 parameters are undefined when not provided
       expect(requestBody.reasoningEffort).toBeUndefined()
       expect(requestBody.verbosity).toBeUndefined()
-      expect(requestBody.provider).toBe('openai')
+      expect(providerCall[0]).toBe('openai')
       expect(requestBody.model).toBe('gpt-5')
     })
 
@@ -1422,42 +1275,29 @@ describe('AgentBlockHandler', () => {
         return Promise.resolve({ success: false, error: 'Unknown tool' })
       })
 
-      mockFetch.mockImplementationOnce(() => {
-        return Promise.resolve({
-          ok: true,
-          headers: {
-            get: (name: string) => {
-              if (name === 'Content-Type') return 'application/json'
-              if (name === 'X-Execution-Data') return null
-              return null
+      mockExecuteProviderRequest.mockResolvedValueOnce({
+        content: 'I will use MCP tools to help you.',
+        model: 'gpt-4o',
+        tokens: { input: 15, output: 25, total: 40 },
+        toolCalls: [
+          {
+            name: 'mcp-server1-list_files',
+            arguments: { path: '/tmp' },
+            result: {
+              success: true,
+              output: { content: [{ type: 'text', text: 'Files listed' }] },
             },
           },
-          json: () =>
-            Promise.resolve({
-              content: 'I will use MCP tools to help you.',
-              model: 'gpt-4o',
-              tokens: { input: 15, output: 25, total: 40 },
-              toolCalls: [
-                {
-                  name: 'mcp-server1-list_files',
-                  arguments: { path: '/tmp' },
-                  result: {
-                    success: true,
-                    output: { content: [{ type: 'text', text: 'Files listed' }] },
-                  },
-                },
-                {
-                  name: 'mcp-server2-search',
-                  arguments: { query: 'test', limit: 5 },
-                  result: {
-                    success: true,
-                    output: { content: [{ type: 'text', text: 'Search results' }] },
-                  },
-                },
-              ],
-              timing: { total: 150 },
-            }),
-        })
+          {
+            name: 'mcp-server2-search',
+            arguments: { query: 'test', limit: 5 },
+            result: {
+              success: true,
+              output: { content: [{ type: 'text', text: 'Search results' }] },
+            },
+          },
+        ],
+        timing: { total: 150 },
       })
 
       const inputs = {
@@ -1533,34 +1373,21 @@ describe('AgentBlockHandler', () => {
         return Promise.resolve({ success: false, error: 'Unknown tool' })
       })
 
-      mockFetch.mockImplementationOnce(() => {
-        return Promise.resolve({
-          ok: true,
-          headers: {
-            get: (name: string) => {
-              if (name === 'Content-Type') return 'application/json'
-              if (name === 'X-Execution-Data') return null
-              return null
+      mockExecuteProviderRequest.mockResolvedValueOnce({
+        content: 'Let me try to use this tool.',
+        model: 'gpt-4o',
+        tokens: { input: 10, output: 15, total: 25 },
+        toolCalls: [
+          {
+            name: 'mcp-server1-failing_tool',
+            arguments: { param: 'value' },
+            result: {
+              success: false,
+              error: 'MCP server connection failed',
             },
           },
-          json: () =>
-            Promise.resolve({
-              content: 'Let me try to use this tool.',
-              model: 'gpt-4o',
-              tokens: { input: 10, output: 15, total: 25 },
-              toolCalls: [
-                {
-                  name: 'mcp-server1-failing_tool',
-                  arguments: { param: 'value' },
-                  result: {
-                    success: false,
-                    error: 'MCP server connection failed',
-                  },
-                },
-              ],
-              timing: { total: 100 },
-            }),
-        })
+        ],
+        timing: { total: 100 },
       })
 
       const inputs = {
@@ -1638,25 +1465,12 @@ describe('AgentBlockHandler', () => {
 
       mockGetProviderFromModel.mockReturnValue('openai')
 
-      mockFetch.mockImplementationOnce(() => {
-        return Promise.resolve({
-          ok: true,
-          headers: {
-            get: (name: string) => {
-              if (name === 'Content-Type') return 'application/json'
-              if (name === 'X-Execution-Data') return null
-              return null
-            },
-          },
-          json: () =>
-            Promise.resolve({
-              content: 'Used MCP tools successfully',
-              model: 'gpt-4o',
-              tokens: { input: 20, output: 30, total: 50 },
-              toolCalls: [],
-              timing: { total: 200 },
-            }),
-        })
+      mockExecuteProviderRequest.mockResolvedValueOnce({
+        content: 'Used MCP tools successfully',
+        model: 'gpt-4o',
+        tokens: { input: 20, output: 30, total: 50 },
+        toolCalls: [],
+        timing: { total: 200 },
       })
 
       mockTransformBlockTool.mockImplementation((tool: any) => ({
@@ -1669,11 +1483,9 @@ describe('AgentBlockHandler', () => {
 
       const result = await handler.execute(mockContext, mockBlock, inputs)
 
-      // Verify that the agent executed successfully with MCP tools
       expect(result).toBeDefined()
-      expect(mockFetch).toHaveBeenCalled()
+      expect(mockExecuteProviderRequest).toHaveBeenCalled()
 
-      // Verify the agent returns the expected response format
       expect((result as any).content).toBe('Used MCP tools successfully')
       expect((result as any).model).toBe('gpt-4o')
     })
@@ -1691,21 +1503,12 @@ describe('AgentBlockHandler', () => {
         return Promise.resolve({ success: false, error: 'Unknown tool' })
       })
 
-      mockFetch.mockImplementationOnce(() => {
-        return Promise.resolve({
-          ok: true,
-          headers: {
-            get: (name: string) => (name === 'Content-Type' ? 'application/json' : null),
-          },
-          json: () =>
-            Promise.resolve({
-              content: 'Using MCP tool',
-              model: 'gpt-4o',
-              tokens: { input: 10, output: 10, total: 20 },
-              toolCalls: [{ name: 'mcp-test-tool', arguments: {} }],
-              timing: { total: 50 },
-            }),
-        })
+      mockExecuteProviderRequest.mockResolvedValueOnce({
+        content: 'Using MCP tool',
+        model: 'gpt-4o',
+        tokens: { input: 10, output: 10, total: 20 },
+        toolCalls: [{ name: 'mcp-test-tool', arguments: {} }],
+        timing: { total: 50 },
       })
 
       const inputs = {
@@ -1815,37 +1618,26 @@ describe('AgentBlockHandler', () => {
       const discoveryCalls = fetchCalls.filter((c) => c.url.includes('/api/mcp/tools/discover'))
       expect(discoveryCalls.length).toBe(0)
 
-      const providerCalls = fetchCalls.filter((c) => c.url.includes('/api/providers'))
-      expect(providerCalls.length).toBe(1)
+      expect(mockExecuteProviderRequest).toHaveBeenCalled()
     })
 
     it('should pass toolSchema to execution endpoint when using cached schema', async () => {
       let executionCall: any = null
 
-      mockFetch.mockImplementation((url: string, options: any) => {
-        if (url.includes('/api/providers')) {
-          return Promise.resolve({
-            ok: true,
-            headers: {
-              get: (name: string) => (name === 'Content-Type' ? 'application/json' : null),
-            },
-            json: () =>
-              Promise.resolve({
-                content: 'Tool executed',
-                model: 'gpt-4o',
-                tokens: { input: 10, output: 10, total: 20 },
-                toolCalls: [
-                  {
-                    name: 'search_files',
-                    arguments: { query: 'test' },
-                    result: { success: true, output: {} },
-                  },
-                ],
-                timing: { total: 50 },
-              }),
-          })
-        }
+      mockExecuteProviderRequest.mockResolvedValueOnce({
+        content: 'Tool executed',
+        model: 'gpt-4o',
+        tokens: { input: 10, output: 10, total: 20 },
+        toolCalls: [
+          {
+            name: 'search_files',
+            arguments: JSON.stringify({ query: 'test' }),
+          },
+        ],
+        timing: { total: 50 },
+      })
 
+      mockFetch.mockImplementation((url: string, options: any) => {
         if (url.includes('/api/mcp/tools/execute')) {
           executionCall = { url, body: JSON.parse(options.body) }
           return Promise.resolve({
@@ -1898,13 +1690,57 @@ describe('AgentBlockHandler', () => {
 
       await handler.execute(contextWithWorkspace, mockBlock, inputs)
 
-      const providerCalls = mockFetch.mock.calls.filter((c: any) => c[0].includes('/api/providers'))
-      expect(providerCalls.length).toBe(1)
+      expect(mockExecuteProviderRequest).toHaveBeenCalled()
+      const providerCallArgs = mockExecuteProviderRequest.mock.calls[0]
+      expect(providerCallArgs[1].tools).toBeDefined()
+      expect(providerCallArgs[1].tools.length).toBe(1)
+      expect(providerCallArgs[1].tools[0].name).toBe('search_files')
+    })
 
-      const providerRequestBody = JSON.parse(providerCalls[0][1].body)
-      expect(providerRequestBody.tools).toBeDefined()
-      expect(providerRequestBody.tools.length).toBe(1)
-      expect(providerRequestBody.tools[0].name).toBe('search_files')
+    it('should pass callChain to executeProviderRequest for MCP cycle detection', async () => {
+      mockFetch.mockImplementation(() =>
+        Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+      )
+
+      const inputs = {
+        model: 'gpt-4o',
+        userPrompt: 'Search for files',
+        apiKey: 'test-api-key',
+        tools: [
+          {
+            type: 'mcp',
+            title: 'search_files',
+            schema: {
+              type: 'object',
+              properties: {
+                query: { type: 'string', description: 'Search query' },
+              },
+              required: ['query'],
+            },
+            params: {
+              serverId: 'mcp-search-server',
+              toolName: 'search_files',
+              serverName: 'search',
+            },
+            usageControl: 'auto' as const,
+          },
+        ],
+      }
+
+      const contextWithCallChain = {
+        ...mockContext,
+        workspaceId: 'test-workspace-123',
+        workflowId: 'test-workflow-456',
+        callChain: ['wf-parent', 'test-workflow-456'],
+      }
+
+      mockGetProviderFromModel.mockReturnValue('openai')
+
+      await handler.execute(contextWithCallChain, mockBlock, inputs)
+
+      expect(mockExecuteProviderRequest).toHaveBeenCalled()
+      const providerCallArgs = mockExecuteProviderRequest.mock.calls[0][1]
+      expect(providerCallArgs.callChain).toEqual(['wf-parent', 'test-workflow-456'])
     })
 
     it('should handle multiple MCP tools from the same server efficiently', async () => {
@@ -1987,14 +1823,12 @@ describe('AgentBlockHandler', () => {
       const discoveryCalls = fetchCalls.filter((c) => c.url.includes('/api/mcp/tools/discover'))
       expect(discoveryCalls.length).toBe(0)
 
-      const providerCalls = fetchCalls.filter((c) => c.url.includes('/api/providers'))
-      expect(providerCalls.length).toBe(1)
-
-      const providerRequestBody = JSON.parse(providerCalls[0].options.body)
-      expect(providerRequestBody.tools.length).toBe(3)
+      expect(mockExecuteProviderRequest).toHaveBeenCalled()
+      const providerCallArgs = mockExecuteProviderRequest.mock.calls[0]
+      expect(providerCallArgs[1].tools.length).toBe(3)
     })
 
-    it('should should fallback to discovery for MCP tools without cached schema', async () => {
+    it('should fallback to discovery for MCP tools without cached schema', async () => {
       const fetchCalls: any[] = []
 
       mockFetch.mockImplementation((url: string, options: any) => {
@@ -2072,6 +1906,284 @@ describe('AgentBlockHandler', () => {
       expect(discoveryCalls.length).toBe(1)
 
       expect(discoveryCalls[0].url).toContain('serverId=mcp-legacy-server')
+    })
+
+    describe('customToolId resolution - DB as source of truth', () => {
+      const staleInlineSchema = {
+        function: {
+          name: 'formatReport',
+          description: 'Formats a report',
+          parameters: {
+            type: 'object',
+            properties: {
+              title: { type: 'string', description: 'Report title' },
+              content: { type: 'string', description: 'Report content' },
+            },
+            required: ['title', 'content'],
+          },
+        },
+      }
+
+      const dbSchema = {
+        function: {
+          name: 'formatReport',
+          description: 'Formats a report',
+          parameters: {
+            type: 'object',
+            properties: {
+              title: { type: 'string', description: 'Report title' },
+              content: { type: 'string', description: 'Report content' },
+              format: { type: 'string', description: 'Output format' },
+            },
+            required: ['title', 'content', 'format'],
+          },
+        },
+      }
+
+      const staleInlineCode = 'return { title, content };'
+      const dbCode = 'return { title, content, format };'
+
+      function mockFetchForCustomTool(toolId: string) {
+        mockFetch.mockImplementation((url: string) => {
+          if (typeof url === 'string' && url.includes('/api/tools/custom')) {
+            return Promise.resolve({
+              ok: true,
+              headers: { get: () => null },
+              json: () =>
+                Promise.resolve({
+                  data: [
+                    {
+                      id: toolId,
+                      title: 'formatReport',
+                      schema: dbSchema,
+                      code: dbCode,
+                    },
+                  ],
+                }),
+            })
+          }
+          return Promise.resolve({
+            ok: true,
+            headers: { get: () => null },
+            json: () => Promise.resolve({}),
+          })
+        })
+      }
+
+      function mockFetchFailure() {
+        mockFetch.mockImplementation((url: string) => {
+          if (typeof url === 'string' && url.includes('/api/tools/custom')) {
+            return Promise.resolve({
+              ok: false,
+              status: 500,
+              headers: { get: () => null },
+              json: () => Promise.resolve({}),
+            })
+          }
+          return Promise.resolve({
+            ok: true,
+            headers: { get: () => null },
+            json: () => Promise.resolve({}),
+          })
+        })
+      }
+
+      beforeEach(() => {
+        Object.defineProperty(global, 'window', {
+          value: undefined,
+          writable: true,
+          configurable: true,
+        })
+      })
+
+      it('should always fetch latest schema from DB when customToolId is present', async () => {
+        const toolId = 'custom-tool-123'
+        mockFetchForCustomTool(toolId)
+
+        const inputs = {
+          model: 'gpt-4o',
+          userPrompt: 'Format a report',
+          apiKey: 'test-api-key',
+          tools: [
+            {
+              type: 'custom-tool',
+              customToolId: toolId,
+              title: 'formatReport',
+              schema: staleInlineSchema,
+              code: staleInlineCode,
+              usageControl: 'auto' as const,
+            },
+          ],
+        }
+
+        mockGetProviderFromModel.mockReturnValue('openai')
+
+        await handler.execute(mockContext, mockBlock, inputs)
+
+        expect(mockExecuteProviderRequest).toHaveBeenCalled()
+        const providerCall = mockExecuteProviderRequest.mock.calls[0]
+        const tools = providerCall[1].tools
+
+        expect(tools.length).toBe(1)
+        // DB schema wins over stale inline — includes format param
+        expect(tools[0].parameters.required).toContain('format')
+        expect(tools[0].parameters.properties).toHaveProperty('format')
+      })
+
+      it('should fetch from DB when customToolId has no inline schema', async () => {
+        const toolId = 'custom-tool-123'
+        mockFetchForCustomTool(toolId)
+
+        const inputs = {
+          model: 'gpt-4o',
+          userPrompt: 'Format a report',
+          apiKey: 'test-api-key',
+          tools: [
+            {
+              type: 'custom-tool',
+              customToolId: toolId,
+              usageControl: 'auto' as const,
+            },
+          ],
+        }
+
+        mockGetProviderFromModel.mockReturnValue('openai')
+
+        await handler.execute(mockContext, mockBlock, inputs)
+
+        expect(mockExecuteProviderRequest).toHaveBeenCalled()
+        const providerCall = mockExecuteProviderRequest.mock.calls[0]
+        const tools = providerCall[1].tools
+
+        expect(tools.length).toBe(1)
+        expect(tools[0].name).toBe('formatReport')
+        expect(tools[0].parameters.required).toContain('format')
+      })
+
+      it('should fall back to inline schema when DB fetch fails and inline exists', async () => {
+        mockFetchFailure()
+
+        const inputs = {
+          model: 'gpt-4o',
+          userPrompt: 'Format a report',
+          apiKey: 'test-api-key',
+          tools: [
+            {
+              type: 'custom-tool',
+              customToolId: 'custom-tool-123',
+              title: 'formatReport',
+              schema: staleInlineSchema,
+              code: staleInlineCode,
+              usageControl: 'auto' as const,
+            },
+          ],
+        }
+
+        mockGetProviderFromModel.mockReturnValue('openai')
+
+        await handler.execute(mockContext, mockBlock, inputs)
+
+        expect(mockExecuteProviderRequest).toHaveBeenCalled()
+        const providerCall = mockExecuteProviderRequest.mock.calls[0]
+        const tools = providerCall[1].tools
+
+        expect(tools.length).toBe(1)
+        expect(tools[0].name).toBe('formatReport')
+        expect(tools[0].parameters.required).not.toContain('format')
+      })
+
+      it('should return null when DB fetch fails and no inline schema exists', async () => {
+        mockFetchFailure()
+
+        const inputs = {
+          model: 'gpt-4o',
+          userPrompt: 'Format a report',
+          apiKey: 'test-api-key',
+          tools: [
+            {
+              type: 'custom-tool',
+              customToolId: 'custom-tool-123',
+              usageControl: 'auto' as const,
+            },
+          ],
+        }
+
+        mockGetProviderFromModel.mockReturnValue('openai')
+
+        await handler.execute(mockContext, mockBlock, inputs)
+
+        expect(mockExecuteProviderRequest).toHaveBeenCalled()
+        const providerCall = mockExecuteProviderRequest.mock.calls[0]
+        const tools = providerCall[1].tools
+
+        expect(tools.length).toBe(0)
+      })
+
+      it('should use DB schema when customToolId resolves', async () => {
+        const toolId = 'custom-tool-123'
+        mockFetchForCustomTool(toolId)
+
+        const inputs = {
+          model: 'gpt-4o',
+          userPrompt: 'Format a report',
+          apiKey: 'test-api-key',
+          tools: [
+            {
+              type: 'custom-tool',
+              customToolId: toolId,
+              title: 'formatReport',
+              schema: staleInlineSchema,
+              code: staleInlineCode,
+              usageControl: 'auto' as const,
+            },
+          ],
+        }
+
+        mockGetProviderFromModel.mockReturnValue('openai')
+
+        await handler.execute(mockContext, mockBlock, inputs)
+
+        expect(mockExecuteProviderRequest).toHaveBeenCalled()
+        const providerCall = mockExecuteProviderRequest.mock.calls[0]
+        const tools = providerCall[1].tools
+
+        expect(tools.length).toBe(1)
+        expect(tools[0].name).toBe('formatReport')
+      })
+
+      it('should not fetch from DB when no customToolId is present', async () => {
+        const inputs = {
+          model: 'gpt-4o',
+          userPrompt: 'Use the tool',
+          apiKey: 'test-api-key',
+          tools: [
+            {
+              type: 'custom-tool',
+              title: 'formatReport',
+              schema: staleInlineSchema,
+              code: staleInlineCode,
+              usageControl: 'auto' as const,
+            },
+          ],
+        }
+
+        mockGetProviderFromModel.mockReturnValue('openai')
+
+        await handler.execute(mockContext, mockBlock, inputs)
+
+        const customToolFetches = mockFetch.mock.calls.filter(
+          (call: any[]) => typeof call[0] === 'string' && call[0].includes('/api/tools/custom')
+        )
+        expect(customToolFetches.length).toBe(0)
+
+        expect(mockExecuteProviderRequest).toHaveBeenCalled()
+        const providerCall = mockExecuteProviderRequest.mock.calls[0]
+        const tools = providerCall[1].tools
+
+        expect(tools.length).toBe(1)
+        expect(tools[0].name).toBe('formatReport')
+        expect(tools[0].parameters.required).not.toContain('format')
+      })
     })
   })
 })

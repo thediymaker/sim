@@ -13,6 +13,14 @@ export interface Resolver {
 }
 
 /**
+ * Sentinel value indicating a reference was resolved to a known block
+ * that produced no output (e.g., the block exists in the workflow but
+ * didn't execute on this path). Distinct from `undefined`, which means
+ * the reference couldn't be matched to any block at all.
+ */
+export const RESOLVED_EMPTY = Symbol('RESOLVED_EMPTY')
+
+/**
  * Navigate through nested object properties using a path array.
  * Supports dot notation and array indices.
  *
@@ -27,24 +35,35 @@ export function navigatePath(obj: any, path: string[]): any {
       return undefined
     }
 
-    // Handle array indexing like "items[0]" or just numeric indices
-    const arrayMatch = part.match(/^([^[]+)\[(\d+)\](.*)$/)
+    const arrayMatch = part.match(/^([^[]+)(\[.+)$/)
     if (arrayMatch) {
-      // Handle complex array access like "items[0]"
-      const [, prop, index] = arrayMatch
-      current = current[prop]
+      const [, prop, bracketsPart] = arrayMatch
+      current =
+        typeof current === 'object' && current !== null
+          ? (current as Record<string, unknown>)[prop]
+          : undefined
       if (current === undefined || current === null) {
         return undefined
       }
-      const idx = Number.parseInt(index, 10)
-      current = Array.isArray(current) ? current[idx] : undefined
+
+      const indices = bracketsPart.match(/\[(\d+)\]/g)
+      if (indices) {
+        for (const indexMatch of indices) {
+          if (current === null || current === undefined) {
+            return undefined
+          }
+          const idx = Number.parseInt(indexMatch.slice(1, -1), 10)
+          current = Array.isArray(current) ? current[idx] : undefined
+        }
+      }
     } else if (/^\d+$/.test(part)) {
-      // Handle plain numeric index
       const index = Number.parseInt(part, 10)
       current = Array.isArray(current) ? current[index] : undefined
     } else {
-      // Handle regular property access
-      current = current[part]
+      current =
+        typeof current === 'object' && current !== null
+          ? (current as Record<string, unknown>)[part]
+          : undefined
     }
   }
   return current

@@ -33,9 +33,20 @@ export const WealthboxBlock: BlockConfig<WealthboxResponse> = {
       id: 'credential',
       title: 'Wealthbox Account',
       type: 'oauth-input',
+      canonicalParamId: 'oauthCredential',
+      mode: 'basic',
       serviceId: 'wealthbox',
       requiredScopes: ['login', 'data'],
       placeholder: 'Select Wealthbox account',
+      required: true,
+    },
+    {
+      id: 'manualCredential',
+      title: 'Wealthbox Account',
+      type: 'short-input',
+      canonicalParamId: 'oauthCredential',
+      mode: 'advanced',
+      placeholder: 'Enter credential ID',
       required: true,
     },
     {
@@ -50,6 +61,7 @@ export const WealthboxBlock: BlockConfig<WealthboxResponse> = {
       title: 'Select Contact',
       type: 'file-selector',
       serviceId: 'wealthbox',
+      selectorKey: 'wealthbox.contacts',
       requiredScopes: ['login', 'data'],
       placeholder: 'Enter Contact ID',
       mode: 'basic',
@@ -169,13 +181,14 @@ Return ONLY the date/time string - no explanations, no quotes, no extra text.`,
         }
       },
       params: (params) => {
-        const { credential, operation, contactId, manualContactId, taskId, ...rest } = params
+        const { oauthCredential, operation, contactId, taskId, ...rest } = params
 
-        const effectiveContactId = (contactId || manualContactId || '').trim()
+        // contactId is the canonical param for both basic (file-selector) and advanced (manualContactId) modes
+        const effectiveContactId = contactId ? String(contactId).trim() : ''
 
         const baseParams = {
           ...rest,
-          credential,
+          credential: oauthCredential,
         }
 
         if (operation === 'read_note' || operation === 'write_note') {
@@ -219,10 +232,9 @@ Return ONLY the date/time string - no explanations, no quotes, no extra text.`,
   },
   inputs: {
     operation: { type: 'string', description: 'Operation to perform' },
-    credential: { type: 'string', description: 'Wealthbox access token' },
+    oauthCredential: { type: 'string', description: 'Wealthbox access token' },
     noteId: { type: 'string', description: 'Note identifier' },
     contactId: { type: 'string', description: 'Contact identifier' },
-    manualContactId: { type: 'string', description: 'Manual contact identifier' },
     taskId: { type: 'string', description: 'Task identifier' },
     content: { type: 'string', description: 'Content text' },
     firstName: { type: 'string', description: 'First name' },

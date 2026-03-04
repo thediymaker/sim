@@ -63,6 +63,15 @@
  *   GET    /api/v1/admin/subscriptions/:id                  - Get subscription details
  *   DELETE /api/v1/admin/subscriptions/:id                  - Cancel subscription (?atPeriodEnd=true for scheduled)
  *
+ *   Credits:
+ *   POST   /api/v1/admin/credits                            - Issue credits to user (by userId or email)
+ *
+ *   Referral Campaigns:
+ *   GET    /api/v1/admin/referral-campaigns                 - List campaigns (?active=true/false)
+ *   POST   /api/v1/admin/referral-campaigns                 - Create campaign
+ *   GET    /api/v1/admin/referral-campaigns/:id             - Get campaign details
+ *   PATCH  /api/v1/admin/referral-campaigns/:id             - Update campaign fields
+ *
  *   Access Control (Permission Groups):
  *   GET    /api/v1/admin/access-control                     - List permission groups (?organizationId=X)
  *   DELETE /api/v1/admin/access-control                     - Delete permission groups for org (?organizationId=X)
@@ -94,6 +103,7 @@ export type {
   AdminOrganization,
   AdminOrganizationBillingSummary,
   AdminOrganizationDetail,
+  AdminReferralCampaign,
   AdminSeatAnalytics,
   AdminSingleResponse,
   AdminSubscription,
@@ -108,6 +118,7 @@ export type {
   AdminWorkspaceMember,
   DbMember,
   DbOrganization,
+  DbReferralCampaign,
   DbSubscription,
   DbUser,
   DbUserStats,
@@ -136,6 +147,7 @@ export {
   parseWorkflowVariables,
   toAdminFolder,
   toAdminOrganization,
+  toAdminReferralCampaign,
   toAdminSubscription,
   toAdminUser,
   toAdminWorkflow,
