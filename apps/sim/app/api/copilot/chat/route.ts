@@ -534,13 +534,17 @@ If no context is provided, rely on your general knowledge but mention you lack s
               },
             })
           } finally {
-            controller.close()
+            try {
+              controller.close()
+            } catch {
+              // controller may already be closed by cancel()
+            }
           }
         },
         async cancel() {
           clientDisconnected = true
           if (eventWriter) {
-            await eventWriter.flush()
+            await eventWriter.close().catch(() => {})
           }
         },
       })
