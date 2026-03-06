@@ -14,7 +14,7 @@ export async function GET(_request: NextRequest) {
     return NextResponse.json({ models: [] })
   }
 
-  const baseUrl = (env.LITELLM_BASE_URL || '').replace(/\/$/, '')
+  const baseUrl = (env.LITELLM_BASE_URL || '').replace(/\/v1\/?$/, '').replace(/\/$/, '')
 
   if (!baseUrl) {
     logger.info('LITELLM_BASE_URL not configured')

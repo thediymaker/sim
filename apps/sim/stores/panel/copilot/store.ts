@@ -355,6 +355,7 @@ function canonicalizeModelMatchKey(modelId: string): string {
 }
 
 const MODEL_PROVIDER_PRIORITY = [
+  'litellm',
   'anthropic',
   'bedrock',
   'azure-anthropic',
