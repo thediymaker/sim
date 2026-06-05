@@ -48,7 +48,9 @@ export async function GET(_request: NextRequest) {
     }
 
     const data = (await response.json()) as { data: Array<{ id: string }> }
-    const allModels = data.data.map((model) => `litellm/${model.id}`)
+    const allModels = data.data.map((model) =>
+      model.id.startsWith('litellm/') ? model.id : `litellm/${model.id}`
+    )
     const models = filterBlacklistedModels(allModels)
 
     logger.info('Successfully fetched LiteLLM models', {

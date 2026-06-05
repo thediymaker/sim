@@ -38,7 +38,7 @@ export const litellmProvider: ProviderConfig = {
       return
     }
 
-    const baseUrl = (env.LITELLM_BASE_URL || '').replace(/\/$/, '')
+    const baseUrl = (env.LITELLM_BASE_URL || '').replace(/\/v1\/?$/, '').replace(/\/$/, '')
     if (!baseUrl) {
       logger.info('LITELLM_BASE_URL not configured, skipping initialization')
       return
@@ -61,7 +61,9 @@ export const litellmProvider: ProviderConfig = {
       }
 
       const data = (await response.json()) as { data: Array<{ id: string }> }
-      const models = data.data.map((model) => `litellm/${model.id}`)
+      const models = data.data.map((model) =>
+        model.id.startsWith('litellm/') ? model.id : `litellm/${model.id}`
+      )
 
       this.models = models
       useProvidersStore.getState().setProviderModels('litellm', models)
@@ -87,7 +89,7 @@ export const litellmProvider: ProviderConfig = {
       stream: !!request.stream,
     })
 
-    const baseUrl = (request.azureEndpoint || env.LITELLM_BASE_URL || '').replace(/\/$/, '')
+    const baseUrl = (request.azureEndpoint || env.LITELLM_BASE_URL || '').replace(/\/v1\/?$/, '').replace(/\/$/, '')
     if (!baseUrl) {
       throw new Error('LITELLM_BASE_URL is required for LiteLLM provider')
     }

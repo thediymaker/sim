@@ -4,6 +4,7 @@ import https from 'https'
 import type { LookupFunction } from 'net'
 import { createLogger } from '@sim/logger'
 import * as ipaddr from 'ipaddr.js'
+import { env } from '@/lib/core/config/env'
 import { type ValidationResult, validateExternalUrl } from '@/lib/core/security/input-validation'
 
 const logger = createLogger('InputValidation')
@@ -56,6 +57,35 @@ export async function validateUrlWithDNS(
   url: string | null | undefined,
   paramName = 'url'
 ): Promise<AsyncValidationResult> {
+  // When private network access is explicitly allowed (self-hosted deployments),
+  // skip SSRF checks and only verify the URL is well-formed with an http/https scheme.
+  if (env.ALLOW_PRIVATE_NETWORK_ACCESS) {
+    if (!url || typeof url !== 'string') {
+      return { isValid: false, error: `${paramName} is required and must be a string` }
+    }
+    let parsedUrl: URL
+    try {
+      parsedUrl = new URL(url)
+    } catch {
+      return { isValid: false, error: `${paramName} must be a valid URL` }
+    }
+    if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+      return { isValid: false, error: `${paramName} must use http:// or https:// protocol` }
+    }
+    try {
+      const { address } = await dns.lookup(parsedUrl.hostname, { verbatim: true })
+      logger.debug('Private network access allowed, skipping SSRF checks', {
+        paramName,
+        hostname: parsedUrl.hostname,
+        resolvedIP: address,
+      })
+      return { isValid: true, resolvedIP: address, originalHostname: parsedUrl.hostname }
+    } catch {
+      // DNS failed — still allow; the actual request will fail with a clear network error
+      return { isValid: true, originalHostname: parsedUrl.hostname }
+    }
+  }
+
   const basicValidation = validateExternalUrl(url, paramName)
   if (!basicValidation.isValid) {
     return basicValidation

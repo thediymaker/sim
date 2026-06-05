@@ -77,19 +77,39 @@ export async function POST(request: NextRequest) {
     const body = await request.json()
     const { workflowId, ...searchParams } = body
 
+    logger.info(`[${requestId}] Knowledge search request`, {
+      workflowId: workflowId || '(none)',
+      hasKnowledgeBaseIds: !!searchParams.knowledgeBaseIds,
+      url: request.url,
+      authHeader: request.headers.get('authorization') ? 'present' : 'absent',
+    })
+
     const auth = await checkSessionOrInternalAuth(request, { requireWorkflowId: false })
     if (!auth.success || !auth.userId) {
+      logger.warn(`[${requestId}] Knowledge search auth failed`, {
+        success: auth.success,
+        userId: auth.userId || '(none)',
+        authType: auth.authType || '(none)',
+        error: auth.error || '(none)',
+      })
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
     const userId = auth.userId
 
     if (workflowId) {
+      logger.info(`[${requestId}] Authorizing workflow`, { workflowId, userId })
       const authorization = await authorizeWorkflowByWorkspacePermission({
         workflowId,
         userId,
         action: 'read',
       })
       if (!authorization.allowed) {
+        logger.warn(`[${requestId}] Workflow authorization failed`, {
+          workflowId,
+          userId,
+          status: authorization.status,
+          message: authorization.message,
+        })
         return NextResponse.json(
           { error: authorization.message || 'Access denied' },
           { status: authorization.status }

@@ -104,7 +104,7 @@ export const PROVIDER_DEFINITIONS: Record<string, ProviderDefinition> = {
     name: 'LiteLLM',
     icon: LiteLLMIcon,
     description: 'LiteLLM proxy for 100+ LLM providers',
-    defaultModel: 'litellm/gpt-3.5-turbo',
+    defaultModel: '',
     modelPatterns: [/^litellm\//],
     capabilities: {
       temperature: { min: 0, max: 2 },

@@ -332,12 +332,12 @@ describe.concurrent('Blocks Module', () => {
         expect(promptSubBlock?.required).toBe(true)
       })
 
-      it('should have model combobox with default value', () => {
+      it('should have model combobox without hardcoded default value', () => {
         const modelSubBlock = block?.subBlocks.find((sb) => sb.id === 'model')
         expect(modelSubBlock).toBeDefined()
         expect(modelSubBlock?.type).toBe('combobox')
         expect(modelSubBlock?.required).toBe(true)
-        expect(modelSubBlock?.defaultValue).toBe('claude-sonnet-4-5')
+        expect(modelSubBlock?.defaultValue).toBeUndefined()
       })
 
       it('should have LLM tool access', () => {
