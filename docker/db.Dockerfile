@@ -1,7 +1,7 @@
 # ========================================
 # Base Stage: Alpine Linux with Bun
 # ========================================
-FROM oven/bun:1.4.1-alpine AS base
+FROM docker.io/oven/bun:1.4.1-alpine AS base
 
 # ========================================
 # Dependencies Stage: Install Dependencies

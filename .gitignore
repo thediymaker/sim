@@ -107,3 +107,6 @@ __pycache__/
 # `apps/sim/lib/uploads/` — 61 files of tracked source — and silently ignore
 # anything added there later.
 /uploads
+
+# Local dev manifests — contain plaintext Secret values, never commit.
+k8s-dev/

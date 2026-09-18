@@ -146,7 +146,8 @@ Return ONLY the JSON array.`,
       type: 'combobox',
       placeholder: 'Type or select a model...',
       required: true,
-      defaultValue: 'claude-sonnet-5',
+      // ASU: no hardcoded default. Anthropic is in BLACKLISTED_PROVIDERS here, so
+      // upstream's default would preselect a model this deployment cannot serve.
       options: getModelOptions,
       commandSearchable: true,
     },

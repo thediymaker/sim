@@ -304,12 +304,16 @@ export const PROVIDER_DEFINITIONS: Record<string, ProviderDefinition> = {
   },
   litellm: {
     id: 'litellm',
-    name: 'LiteLLM',
+    // ASU: user-facing label. The internal provider id stays `litellm` so this
+    // stays a 4-file patch instead of a 24-file rename across churn-heavy files.
+    name: 'ASU AIR',
     icon: LitellmIcon,
     color: '#040229',
     description: 'LiteLLM proxy with an OpenAI-compatible API',
     defaultModel: '',
-    modelPatterns: [/^litellm\//],
+    // `litellm/` kept alongside `asuair/` so model ids stored before the rename
+    // still resolve to this provider.
+    modelPatterns: [/^asuair\//, /^litellm\//],
     capabilities: {
       temperature: { min: 0, max: 2 },
       toolUsageControl: true,

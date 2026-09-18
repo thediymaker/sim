@@ -1,8 +1,11 @@
 import type { Dirent } from 'node:fs'
 import { opendir, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
+import { createLogger } from '@sim/logger'
 import { UPLOAD_DIR_SERVER } from '@/lib/uploads/core/setup.server'
 import { LOCAL_MULTIPART_ROOT, LOCAL_STAGING_ROOT } from '@/lib/uploads/core/storage-key'
+
+const logger = createLogger('LocalUploadCleanup')
 
 export const LOCAL_UPLOAD_CLEANUP_INTERVAL_MS = 15 * 60 * 1000
 export const LOCAL_UPLOAD_ARTIFACT_TTL_MS = 25 * 60 * 60 * 1000
@@ -36,10 +39,19 @@ export function maybeCleanupLocalUploadArtifacts(
   if (now - lastCleanupAt < LOCAL_UPLOAD_CLEANUP_INTERVAL_MS) {
     return Promise.resolve({ scanned: 0, removed: 0 })
   }
-  activeCleanup = sweepLocalUploadArtifacts({ now }).then((result) => {
-    lastCleanupAt = now
-    return result
-  })
+  activeCleanup = sweepLocalUploadArtifacts({ now })
+    .catch((error) => {
+      // This sweep is opportunistic maintenance, but it runs inline on every
+      // upload-session create -- so a rejection here decides whether a user's
+      // upload succeeds. It must not. Report it and yield an empty result; the
+      // next sweep re-derives everything it needs from the filesystem.
+      logger.error('Local upload artifact sweep failed', { error })
+      return { scanned: 0, removed: 0 }
+    })
+    .then((result) => {
+      lastCleanupAt = now
+      return result
+    })
   return activeCleanup.finally(() => {
     activeCleanup = null
   })
@@ -95,6 +107,27 @@ export function resetLocalUploadCleanupForTesting(): void {
   lastCleanupAt = 0
 }
 
+/**
+ * Drops a root's cached directory handle, closing it on a best effort.
+ *
+ * The reference is cleared BEFORE the close is attempted: `cleanupRootStates`
+ * outlives the request, so a throw between "handle is dead" and "handle is
+ * forgotten" caches a closed handle for the life of the process and every
+ * later sweep fails on it. Node's `Dir.close()` returns a promise; Bun's
+ * returns `undefined`, so the result is awaited rather than `.catch()`-ed.
+ */
+async function releaseDirectory(state: CleanupRootState): Promise<void> {
+  const directory = state.directory
+  state.directory = null
+  if (!directory) return
+  try {
+    await directory.close()
+  } catch {
+    // Already closed, or the root vanished underneath us. Either way there is
+    // nothing left to reclaim and nothing the caller can do about it.
+  }
+}
+
 async function readNextCleanupArtifact(
   exhaustedRoots: Set<number>
 ): Promise<{ directoryPath: string; entry: Dirent } | null> {
@@ -117,11 +150,28 @@ async function readNextCleanupArtifact(
       }
     }
 
-    const entry = await state.directory.read()
+    let entry: Dirent | null
+    try {
+      entry = await state.directory.read()
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      // Two ways a handle stops producing entries without the directory being
+      // walked to its end:
+      //   ENOENT         Bun's opendir is lazy, so a missing root resolves and
+      //                  the error (reported as `scandir`) surfaces here rather
+      //                  than at opendir() above, where Node raises it.
+      //   ERR_DIR_CLOSED the handle cached from an earlier sweep did not
+      //                  survive to this one.
+      // Neither is a reason to fail an upload: the root simply has nothing more
+      // to give this pass, and the next sweep reopens it.
+      await releaseDirectory(state)
+      if (code !== 'ENOENT' && code !== 'ERR_DIR_CLOSED') throw error
+      exhaustedRoots.add(rootIndex)
+      continue
+    }
     if (entry) return { directoryPath, entry }
 
-    await state.directory.close()
-    state.directory = null
+    await releaseDirectory(state)
     exhaustedRoots.add(rootIndex)
   }
   return null

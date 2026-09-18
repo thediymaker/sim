@@ -18,6 +18,7 @@ import {
 import { ConsentProvider } from '@/app/_shell/consent/consent-provider'
 import { DesktopUpdateGate } from '@/app/_shell/desktop-update-gate'
 import { HydrationErrorHandler } from '@/app/_shell/hydration-error-handler'
+import { NoticeProvider } from '@/app/_shell/notice/notice-provider'
 import { QueryProvider } from '@/app/_shell/providers/query-provider'
 import { SessionProvider } from '@/app/_shell/providers/session-provider'
 import { ThemeProvider } from '@/app/_shell/providers/theme-provider'
@@ -55,6 +56,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               />
               <TooltipProvider>
                 <BrandedLayout>{children}</BrandedLayout>
+                {/* ASU: operator announcement. Self-hosted has no other channel
+                    to its users, and unlike ConsentProvider this is not gated on
+                    isHosted and does render inside the workspace. Off unless
+                    NEXT_PUBLIC_NOTICE_ID is set; shown once per id per browser. */}
+                <NoticeProvider />
               </TooltipProvider>
             </SessionProvider>
           </QueryProvider>

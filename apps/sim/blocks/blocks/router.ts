@@ -182,7 +182,8 @@ export const RouterBlock: BlockConfig<RouterResponse> = {
       type: 'combobox',
       placeholder: 'Type or select a model...',
       required: true,
-      defaultValue: 'claude-sonnet-5',
+      // ASU: no hardcoded default. Anthropic is in BLACKLISTED_PROVIDERS here, so
+      // upstream's default would preselect a model this deployment cannot serve.
       options: getModelOptions,
     },
     ...getProviderCredentialSubBlocks(),
@@ -299,7 +300,8 @@ export const RouterV2Block: BlockConfig<RouterV2Response> = {
       type: 'combobox',
       placeholder: 'Type or select a model...',
       required: true,
-      defaultValue: 'claude-sonnet-5',
+      // ASU: no hardcoded default. Anthropic is in BLACKLISTED_PROVIDERS here, so
+      // upstream's default would preselect a model this deployment cannot serve.
       options: getModelOptions,
     },
     ...getProviderCredentialSubBlocks(),

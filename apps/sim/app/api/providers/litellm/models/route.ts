@@ -49,7 +49,7 @@ export const GET = withRouteHandler(async (_request: NextRequest) => {
     }
 
     const data = vllmUpstreamResponseSchema.parse(await response.json())
-    const allModels = data.data.map((model) => `litellm/${model.id}`)
+    const allModels = data.data.map((model) => `asuair/${model.id}`)
     const models = filterBlacklistedModels(allModels)
 
     logger.info('Successfully fetched LiteLLM models', {

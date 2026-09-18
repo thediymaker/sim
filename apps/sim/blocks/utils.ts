@@ -167,6 +167,7 @@ function shouldRequireApiKeyForModel(model: string): boolean {
   if (
     normalizedModel.startsWith('ollama/') ||
     normalizedModel.startsWith('vllm/') ||
+    normalizedModel.startsWith('asuair/') ||
     normalizedModel.startsWith('litellm/')
   ) {
     return false

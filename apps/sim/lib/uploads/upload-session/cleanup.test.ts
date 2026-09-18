@@ -4,13 +4,72 @@
 import { mkdir, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { testUploadDirectory } = vi.hoisted(() => ({
+const { testUploadDirectory, bunLazyRoots, unreadableRoots } = vi.hoisted(() => ({
   testUploadDirectory: `/tmp/sim-upload-session-cleanup-${process.pid}`,
+  /** Roots that should behave the way Bun's lazy `opendir` does. */
+  bunLazyRoots: new Set<string>(),
+  /** Roots whose `opendir` fails with something the sweep cannot interpret. */
+  unreadableRoots: new Set<string>(),
 }))
 
 vi.mock('@/lib/uploads/core/setup.server', () => ({
   UPLOAD_DIR_SERVER: testUploadDirectory,
 }))
+
+/**
+ * Bun and Node disagree about `fs.promises.opendir` in two ways that decide
+ * whether a missing sweep root is survivable, and the tests below are the only
+ * place either difference is visible under a Node test runner:
+ *
+ *   - Bun's `opendir` is lazy. A missing directory resolves, and the ENOENT
+ *     (reported as `scandir`) is raised by the first `read()`.
+ *   - Bun's `Dir.close()` returns `undefined`; Node's returns a promise. Code
+ *     that treats the result as thenable throws a TypeError on Bun.
+ *
+ * Together those turned one missing directory into a permanent upload outage:
+ * the TypeError escaped before the dead handle was dropped from module state,
+ * so every later sweep read a closed handle and every upload 500'd until the
+ * process restarted.
+ */
+vi.mock('node:fs/promises', async () => {
+  const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
+  return {
+    ...actual,
+    opendir: async (path: string) => {
+      if (unreadableRoots.has(path)) {
+        throw Object.assign(new Error(`EACCES: permission denied, scandir '${path}'`), {
+          code: 'EACCES',
+          syscall: 'scandir',
+          path,
+        })
+      }
+      if (!bunLazyRoots.has(path)) return actual.opendir(path)
+      let closed = false
+      return {
+        path,
+        async read() {
+          if (closed) {
+            throw Object.assign(new Error('Directory handle was closed'), {
+              code: 'ERR_DIR_CLOSED',
+            })
+          }
+          throw Object.assign(new Error(`ENOENT: no such file or directory, scandir '${path}'`), {
+            code: 'ENOENT',
+            syscall: 'scandir',
+            path,
+          })
+        },
+        close() {
+          closed = true
+          return undefined as unknown as Promise<void>
+        },
+        closeSync() {
+          closed = true
+        },
+      } as unknown as Awaited<ReturnType<typeof actual.opendir>>
+    },
+  }
+})
 
 import {
   LOCAL_UPLOAD_ARTIFACT_TTL_MS,
@@ -22,6 +81,8 @@ import {
 describe('local upload artifact cleanup', () => {
   beforeEach(async () => {
     resetLocalUploadCleanupForTesting()
+    bunLazyRoots.clear()
+    unreadableRoots.clear()
     await rm(testUploadDirectory, { recursive: true, force: true })
     await mkdir(testUploadDirectory, { recursive: true })
   })
@@ -80,6 +141,33 @@ describe('local upload artifact cleanup', () => {
     expect(sweeps.reduce((total, result) => total + result.removed, 0)).toBe(1)
     await expect(stat(`${testUploadDirectory}/.multipart/expired-last`)).rejects.toMatchObject({
       code: 'ENOENT',
+    })
+  })
+
+  // Every restart hands the app an empty upload volume, so the first
+  // upload-session create of a pod's life sweeps roots that nothing has written
+  // yet. That must cost the upload nothing -- and, because the handles are
+  // cached in module state, it must cost the NEXT upload nothing either.
+  it('survives roots that only report their absence at read, and does not poison later sweeps', async () => {
+    const now = Date.UTC(2026, 7, 4, 12)
+    bunLazyRoots.add(`${testUploadDirectory}/.multipart`)
+    bunLazyRoots.add(`${testUploadDirectory}/.staging`)
+
+    await expect(sweepLocalUploadArtifacts({ now })).resolves.toEqual({ scanned: 0, removed: 0 })
+    await expect(sweepLocalUploadArtifacts({ now })).resolves.toEqual({ scanned: 0, removed: 0 })
+  })
+
+  // The sweep is maintenance. It runs inline on upload-session create, so any
+  // failure it cannot interpret must still leave the upload alone.
+  it('never fails its caller, even when the sweep itself cannot run', async () => {
+    const now = Date.UTC(2026, 7, 4, 12)
+    unreadableRoots.add(`${testUploadDirectory}/.multipart`)
+    unreadableRoots.add(`${testUploadDirectory}/.staging`)
+
+    await expect(sweepLocalUploadArtifacts({ now })).rejects.toMatchObject({ code: 'EACCES' })
+    await expect(maybeCleanupLocalUploadArtifacts(now)).resolves.toEqual({
+      scanned: 0,
+      removed: 0,
     })
   })
 

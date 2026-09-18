@@ -1,4 +1,20 @@
+import { getEnv } from '@/lib/core/config/env'
 import type { EmbeddingAdapterFactory } from '@/lib/embeddings/types'
+
+/**
+ * ASU: base URL for the OpenAI-compatible embeddings endpoint. Unset upstream,
+ * so the default reproduces stock behaviour exactly; set to a LiteLLM/vLLM
+ * proxy to serve knowledge-base embeddings from a self-hosted model. Sim pins
+ * every KB vector to KB_EMBEDDING_DIMENSIONS and passes it as `dimensions`, so
+ * the served model must honour Matryoshka truncation at that width.
+ */
+const openAIEmbeddingsBase = (): string | undefined =>
+  getEnv('OPENAI_BASE_URL')?.replace(/\/+$/, '') || undefined
+
+const openAIEmbeddingsUrl = (): string => {
+  const base = openAIEmbeddingsBase()
+  return base ? `${base}/embeddings` : 'https://api.openai.com/v1/embeddings'
+}
 
 /** OpenAI-compatible envelope; Azure and OpenRouter request numeric vectors. */
 export interface OpenAIEmbeddingResponse<TEmbedding = number[]> {
@@ -35,22 +51,41 @@ export const createOpenAIAdapter: EmbeddingAdapterFactory = ({
   nativeDimensions,
 }) => ({
   maxItemsPerRequest: OPENAI_MAX_ITEMS_PER_REQUEST,
-  buildRequest: ({ inputs, dimensions }) => ({
-    apiUrl: 'https://api.openai.com/v1/embeddings',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: {
-      input: inputs,
-      model: modelName,
-      encoding_format: 'base64',
-      ...(dimensions !== undefined && { dimensions }),
-    },
-    parse: (json) =>
-      (json as OpenAIEmbeddingResponse<string>).data.map((item) =>
-        decodeEmbedding(item.embedding, dimensions ?? nativeDimensions)
-      ),
-    parseTokens: (json) => (json as OpenAIEmbeddingResponse).usage?.total_tokens,
-  }),
+  buildRequest: ({ inputs, dimensions }) => {
+    // ASU: `encoding_format: 'base64'` is a request, not a guarantee. OpenAI
+    // honours it; an OpenAI-compatible gateway need not, and ours (LiteLLM in
+    // front of vLLM) answers with plain float arrays whatever we ask for --
+    // which `decodeEmbedding` rejects, failing every knowledge-base embedding.
+    // Upstream is right to reject an unexpected shape rather than guess at it,
+    // so do not loosen the check: ask for the format we can actually parse.
+    // Only a deployment that has pointed OPENAI_BASE_URL at its own gateway
+    // takes this branch; the stock OpenAI path is untouched, base64 and strict.
+    const base64 = openAIEmbeddingsBase() === undefined
+    return {
+      apiUrl: openAIEmbeddingsUrl(),
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: {
+        input: inputs,
+        model: modelName,
+        encoding_format: base64 ? 'base64' : 'float',
+        ...(dimensions !== undefined && { dimensions }),
+      },
+      parse: (json) =>
+        (json as OpenAIEmbeddingResponse<string | number[]>).data.map((item) => {
+          if (base64) {
+            if (typeof item.embedding !== 'string') throw new Error('Invalid base64 embedding')
+            return decodeEmbedding(item.embedding, dimensions ?? nativeDimensions)
+          }
+          const width = dimensions ?? nativeDimensions
+          if (!Array.isArray(item.embedding) || item.embedding.length !== width) {
+            throw new Error(`Expected a ${width}-dimensional float embedding`)
+          }
+          return item.embedding
+        }),
+      parseTokens: (json) => (json as OpenAIEmbeddingResponse).usage?.total_tokens,
+    }
+  },
 })

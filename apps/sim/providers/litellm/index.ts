@@ -78,7 +78,7 @@ export const litellmProvider: ProviderConfig = {
 
       const { vllmUpstreamResponseSchema } = await import('@/lib/api/contracts/providers')
       const data = vllmUpstreamResponseSchema.parse(await response.json())
-      const models = data.data.map((model) => `litellm/${model.id}`)
+      const models = data.data.map((model) => `asuair/${model.id}`)
 
       this.models = models
       useProvidersStore.getState().setProviderModels('litellm', models)
@@ -142,7 +142,8 @@ export const litellmProvider: ProviderConfig = {
       : undefined
 
     const payload: any = {
-      model: request.model.replace(/^litellm\//i, ''),
+      // Accepts the pre-rename `litellm/` prefix too, so old workflows keep running.
+      model: request.model.replace(/^(?:asuair|litellm)\//i, ''),
       messages: formattedMessages,
     }
 
