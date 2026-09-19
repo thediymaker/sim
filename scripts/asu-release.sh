@@ -190,7 +190,10 @@ else
   for spec in "${IMAGES[@]}"; do
     name="${spec%%:*}"; dockerfile="${spec#*:}"
     note "building $name"
-    podman build --pull=newer -f "$dockerfile" -t "$REGISTRY/$name:$IMAGE_TAG" . \
+    # SIM_VERSION is what /api/health reports. Passing the tag here is what keeps
+    # "what version is running?" answerable from the app instead of from kubectl.
+    podman build --pull=newer --build-arg "SIM_VERSION=$IMAGE_TAG" \
+      -f "$dockerfile" -t "$REGISTRY/$name:$IMAGE_TAG" . \
       || die "build failed: $name (exit 137 means OOM — this host needs >32GB)"
   done
   for spec in "${IMAGES[@]}"; do
@@ -273,6 +276,18 @@ echo
 note "app responds:"
 kubectl exec -n "$NAMESPACE" "$(app_pod)" -c app -- \
   sh -c 'curl -sS -o /dev/null -w "  GET / -> %{http_code}\n" http://localhost:3000/'
+
+# The authoritative check that the rollout actually replaced what was running:
+# the pod reports the build it was made from, not what the chart believes.
+note "version reported by the running app:"
+reported="$(kubectl exec -n "$NAMESPACE" "$(app_pod)" -c app -- \
+  sh -c 'curl -sS http://localhost:3000/api/health' 2>/dev/null \
+  | python3 -c 'import json,sys;print(json.load(sys.stdin).get("version","?"))' 2>/dev/null || echo "?")"
+if [[ "$reported" == "$IMAGE_TAG" ]]; then
+  note "  $reported"
+else
+  warn "app reports '$reported' but this release built '$IMAGE_TAG' — stale pod or cached image?"
+fi
 
 printf '\n%sReleased %s as %s%s\n' "$c_grn" "$TARGET_TAG" "$IMAGE_TAG" "$c_off"
 note "rollback: helm rollback $RELEASE $HELM_REV -n $NAMESPACE"

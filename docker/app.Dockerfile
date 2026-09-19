@@ -134,6 +134,19 @@ WORKDIR /app
 # Node.js 24, Python, ffmpeg, etc. are already installed in base stage
 ENV NODE_ENV=production
 
+# ASU: the running build's identity, reported by /api/health.
+#
+# Baked in at build time rather than injected by the chart, because the chart's
+# only version string is Chart.AppVersion — which tracks the chart, not the
+# image, and was reading v0.8.26 while the cluster ran v0.8.43. A version that
+# can drift from what is actually running is worse than none at all: it is
+# consulted precisely when something looks wrong.
+#
+# scripts/asu-release.sh passes the image tag here. A plain `podman build` with
+# no --build-arg leaves it "unknown", which is honest.
+ARG SIM_VERSION=unknown
+ENV SIM_VERSION=${SIM_VERSION}
+
 # Create non-root user and group
 RUN groupadd -g 1001 nodejs && \
     useradd -u 1001 -g nodejs nextjs
